@@ -1,0 +1,60 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+		{
+			"type": "node",
+			"request": "launch",
+			"name": "Launch make clean",
+			"program": "${workspaceFolder}/dist/cli.js",
+			"runtimeArgs": [
+				"--expose-internals"
+			],
+            "cwd": "${workspaceFolder}",
+            "args": ["-C", "test", "clean"],
+            "sourceMaps": true,
+            "smartStep": true,
+            "preLaunchTask": "npm: build",
+			"console": "integratedTerminal",
+		},
+		{
+			"type": "node",
+			"request": "launch",
+			"name": "Launch make all",
+			"program": "${workspaceFolder}/dist/cli.js",
+            "cwd": "${workspaceFolder}",
+            "args": ["-C", "test", "all"],
+            "sourceMaps": true,
+            "smartStep": true,
+            "preLaunchTask": "npm: build",
+			"console": "integratedTerminal",
+		},
+        {
+            "type": "node",
+            "request": "launch",
+            "name": "Test make",
+            "runtimeExecutable": "ts-node",
+            "cwd": "${workspaceFolder}/test",
+            "args": ["test.ts"],
+            "sourceMaps": true,
+            "preLaunchTask": "npm: build",
+			"console": "integratedTerminal"
+        },
+		{
+            "type": "node-terminal",
+            "name": "Debug Transform",
+            "request": "launch",
+            "command": "npm run build",
+            "cwd": "${workspaceFolder}"
+        },
+		{
+            "type": "node-terminal",
+            "name": "Debug MakeLinks",
+            "request": "launch",
+            "command": "ts-node ./scripts/makelinks.ts",
+            "cwd": "${workspaceFolder}"
+        }
+    ]
+}

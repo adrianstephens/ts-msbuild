@@ -1,0 +1,40 @@
+{
+	"name": "@isopodlabs/msbuild",
+	"version": "0.0.0",
+	"description": "A package for reading and running MSBuild files with TypeScript.",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/adrianstephens/ts-msbuild.git"
+	},
+	"main": "dist/index.js",
+	"files": [
+		"dist/**/*.{js,d.ts}",
+		"README.md"
+	],
+	"scripts": {
+		"build": "tsc",
+		"test": "echo \"No tests specified\" && exit 0",
+		"patch": "ts-patch install"
+	},
+	"keywords": [
+		"msbuild",
+		"parser",
+		"build",
+		"typescript",
+		"nodejs"
+	],
+	"author": "Adrian Stephens",
+	"license": "MIT",
+	"devDependencies": {
+		"@types/node": "^22.13.8",
+		"eslint": "^9.21.0",
+		"ts-node": "^10.9.2",
+		"ts-patch": "^3.3.0",
+		"typescript": "^5.8.2",
+		"typescript-eslint": "^8.26.0"
+	},
+	"dependencies": {
+		"@isopodlabs/utilities": "^1.4.1",
+		"@isopodlabs/xml": "^1.2.0"
+	}
+}
