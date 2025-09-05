@@ -1,12 +1,13 @@
 
-//import * as vscode from 'vscode';
+/* eslint-disable @typescript-eslint/no-unused-vars */
 import * as fs from 'fs';
 import * as path from 'path';
-import * as registry from @isopodlabs/registry';
+import * as registry from '@isopodlabs/registry';
 import * as utils from '@isopodlabs/utilities';
+import {insensitive} from '@isopodlabs/utilities';
 import {Version, version_compare, extendVersion} from './Version';
 import * as Locations from './Locations';
-//import {Extension, log, loadTextFile} from '../extension';
+import {search, exists} from './index';
 
 type StringFunction = (...params: string[])=>any;
 
@@ -270,21 +271,21 @@ class Text_RegularExpressions_Regex extends StaticFunctions {
 
 class IO_Directory extends StaticFunctions {
 	static { StaticFunctions.register('IO.Directory', this); }
-	static GetDirectories(dir:string, pattern:string)	{ return fs.search(path.join(dir, pattern), undefined, vscode.FileType.Directory); }
-	static GetFiles(dir:string, pattern:string)			{ return fs.search(path.join(dir, pattern), undefined, vscode.FileType.File); }
+	static GetDirectories(dir:string, pattern:string)	{ return search(path.join(dir, pattern), undefined, false); }
+	static GetFiles(dir:string, pattern:string)			{ return search(path.join(dir, pattern), undefined, true); }
 //	static GetLastAccessTime(...params: string[])		{ return 'GetLastAccessTime'; }
-	static GetLastWriteTime(a: string)					{ return fs.getStat(a).then(stat => stat?.mtime); }
+	static GetLastWriteTime(a: string)					{ return fs.promises.stat(a).then(stat => stat?.mtime); }
 	static GetParent(a: string)							{ return path.dirname(a); }
 }
 		
 class IO_File extends StaticFunctions {
 	static { StaticFunctions.register('IO.File', this); }
-	static Exists(a: string)							{ return fs.exists(a); }
-	static GetAttributes(a: string)						{ return fs.getStat(a); }
-	static GetCreationTime(a: string)					{ return fs.getStat(a).then(stat => stat?.ctime); }
-	static GetLastAccessTime(a: string)					{ return fs.getStat(a).then(stat => stat?.mtime); }
-	static GetLastWriteTime(a: string)					{ return fs.getStat(a).then(stat => stat?.mtime); }
-	static ReadAllText(a: string)						{ return loadTextFile(a); }
+	static Exists(a: string)							{ return exists(a); }
+	static GetAttributes(a: string)						{ return fs.promises.stat(a); }
+	static GetCreationTime(a: string)					{ return fs.promises.stat(a).then(stat => stat?.ctime); }
+	static GetLastAccessTime(a: string)					{ return fs.promises.stat(a).then(stat => stat?.mtime); }
+	static GetLastWriteTime(a: string)					{ return fs.promises.stat(a).then(stat => stat?.mtime); }
+	static ReadAllText(a: string)						{ return fs.promises.readFile(a, 'utf8'); }
 }
 
 class IO_Path extends StaticFunctions {
@@ -374,7 +375,7 @@ class MSBuild extends StaticFunctions {
 		return dir ? path.join(dir, filename) : '';
 	}
 	static async GetDirectoryNameOfFileAbove(startingDirectory: string, filename: string)	{
-		while (!await fs.exists(path.join(startingDirectory, filename))) {
+		while (!await exists(path.join(startingDirectory, filename))) {
 			const parent = path.dirname(startingDirectory);
 			if (parent === startingDirectory)
 				return '';
@@ -399,7 +400,7 @@ class MSBuild extends StaticFunctions {
 	static GetToolsDirectory32()			{ return path.join(this.GetVsInstallRoot(), 'MSBuild', 'Current', 'Bin'); }
 	static GetToolsDirectory64()			{ return path.join(this.GetVsInstallRoot(), 'MSBuild', 'Current', 'Bin', 'amd64'); }
 	static GetCurrentToolsDirectory()		{ return this.GetToolsDirectory64(); }
-	static GetVsInstallRoot()				{ return Extension.vsdir; }
+	static GetVsInstallRoot()				{ return Locations.vsdir; }
 	static IsRunningFromVisualStudio()		{ return false; }
 
 	static GetTargetFrameworkIdentifier(targetFramework: string) 					{ return ParseTargetFramework(targetFramework)?.framework_id; }
@@ -442,7 +443,7 @@ class Microsoft_Build_Utilities_ToolLocationHelper extends StaticFunctions {
 		if (possibleRoots) {
 			const files = relativeFilePaths.split(';');
 			for (const root of possibleRoots.split(';')) {
-				if (await Promise.all(files.map(f => fs.stat_reject(path.join(root, f)))).then(()=>true).catch(()=>false))
+				if (await Promise.all(files.map(f => exists(path.join(root, f)))))
 					return root;
 			}
 		}
@@ -575,7 +576,7 @@ export async function substitutor(m: RegExpExecArray, right:string, properties: 
 				if (right[close] === ']')
 					++close;
 				else
-					log('Missing closing bracket');
+					console.log('Missing closing bracket');
 				re2.lastIndex = close;
 			}
 		}
@@ -639,7 +640,7 @@ class ExpressionParser {
 			}
 			case 'Exists(': {
 				a = this.Evaluate();
-				return this.get_token() === ')' ? fs.exists(a || "") : undefined;
+				return this.get_token() === ')' ? exists(a || "") : undefined;
 			}
 			case 'HasTrailingSlash(': {
 				a = this.Evaluate();

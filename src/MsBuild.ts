@@ -1,11 +1,12 @@
-//import * as vscode from 'vscode';
 import * as path from 'path';
-//import * as fs from '@isopodlabs/vscode_utils/fs';
+import * as fs from 'fs';
 import * as xml from '@isopodlabs/xml';
 import * as expression from './expression';
 import * as utils from '@isopodlabs/utilities';
-//import {ProjectItemEntry, Properties} from '../Project';
-//import {XMLCache, xml_load, xml_save, log} from '../extension';
+import * as insensitive from '@isopodlabs/utilities/insensitive';
+
+import {ProjectItemEntry, XMLCache, xml_load, xml_save, Glob, exists, toOSPath, search} from './index';
+
 
 //-----------------------------------------------------------------------------
 //	types
@@ -28,15 +29,16 @@ function ParseSDKKey(key: string) {
 	};
 }
 
+
 //-----------------------------------------------------------------------------
 //	Properties
 //-----------------------------------------------------------------------------
 
 export class PropertyContext {
 	public globals	= new Set<string>;
-	public properties: Properties;
+	public properties: Record<string, string>;
 	
-	constructor(properties: Properties = {}) {
+	constructor(properties: Record<string, string> = {}) {
 		this.properties = insensitive.Record(properties);
 	}
 
@@ -58,7 +60,7 @@ export class PropertyContext {
 	}
 
 	public async substitute_path(value: string): Promise<string> {
-		return fs.toOSPath(await this.substitute(value, true));
+		return toOSPath(await this.substitute(value, true));
 	}
 
 	public async get_fullpath(origpath: string): Promise<string> {
@@ -84,7 +86,7 @@ export class PropertyContext {
 		}
 	}
 
-	public async add(props: Properties) {
+	public async add(props: Record<string, string>) {
 		for (const i in props) {
 			const name = i.toUpperCase();
 			if (!this.globals.has(name))
@@ -92,7 +94,7 @@ export class PropertyContext {
 		}
 	}
 
-	public addDirect(props: Properties) {
+	public addDirect(props: Record<string, string>) {
 		for (const i in props)
 			this.properties[i.toUpperCase()] = props[i];
 	}
@@ -121,10 +123,10 @@ export class PropertyContext {
 
 export async function evaluateImport(import_path: string, properties: PropertyContext, label = '', imports?: Imports, modified?: Origins) {
 	const resolved	= await properties.get_fullpath(import_path);
-	const files		= await fs.search(resolved);
+	const files		= await search(resolved);
 	for (const i of files) {
 		if (imports && imports.all.indexOf(i) !== -1) {
-			log(`Double import: ${i}`);
+			console.log(`Double import: ${i}`);
 			continue;
 		}
 
@@ -144,7 +146,7 @@ export async function evaluateImport(import_path: string, properties: PropertyCo
 				imports.all.push(i);
 			}
 		} else {
-			log(`Invalid import: ${i} from ${import_path}`);
+			console.log(`Invalid import: ${i} from ${import_path}`);
 		}
 	}
 }
@@ -225,11 +227,11 @@ function getItemMode(name: string) {
 }
 
 function getLink(element: xml.Element) {
-	const link 		= fs.toOSPath(element.attributes.Link ?? element.elements.Link?.firstText());
+	const link 		= toOSPath(element.attributes.Link ?? element.elements.Link?.firstText());
 	if (link)
 		return link;
 
-	const linkBase 	= fs.toOSPath(element.attributes.LinkBase ?? element.elements.LinkBase?.firstText());
+	const linkBase 	= toOSPath(element.attributes.LinkBase ?? element.elements.LinkBase?.firstText());
 	if (linkBase)
 		return path.join(linkBase, "%(RecursiveDir)%(Filename)%(Extension)");
 }
@@ -262,7 +264,7 @@ async function evaluate_data(items: xml.Element[], settings: Settings, propertie
 				.then(subs => utils.async_replace_back(subs, /%\((\w+)(\))/g, async (m: RegExpExecArray, right:string) => {
 					const replace = await settings[m[1]];
 					if (!replace) {
-						log(`no % substitute for ${m[1]}`);
+						console.log(`no % substitute for ${m[1]}`);
 						return m[0] + right;
 					}
 					return replace + right;
@@ -278,10 +280,10 @@ async function evaluate_data(items: xml.Element[], settings: Settings, propertie
 	}
 }
 
-export class XMLProjectItemEntry implements ProjectItemEntry {
+class XMLProjectItemEntry implements ProjectItemEntry {
 	private elements: xml.Element[];
 	public data = new Proxy(this, {
-		get(target, prop: string, receiver) {
+		get(target, prop: string) {
 			if (prop in target.other)
 				return target.other[prop];
 			return target.elements.find(e => e.name === prop)?.firstText() || '';
@@ -289,7 +291,7 @@ export class XMLProjectItemEntry implements ProjectItemEntry {
 		ownKeys(target) {
 			return target.elements.map(e => e.name);
 		},
-		getOwnPropertyDescriptor(target, prop) {
+		getOwnPropertyDescriptor() {
 			return {configurable: true, enumerable: true};
 		}
 	
@@ -331,7 +333,7 @@ export class XMLProjectItemEntry implements ProjectItemEntry {
 	}
 }
 
-type Definition = {
+interface Definition {
 	condition: 	string;
 	source?:	xml.Element;
 	data: 		xml.Element[];
@@ -339,12 +341,12 @@ type Definition = {
 };
 
 class DeferredStat {
-	stat?: Thenable<vscode.FileStat | undefined>;
+	stat?: Promise<fs.Stats | undefined>;
 	constructor(public path: string) {}
-	then(f: (s: vscode.FileStat|undefined) => any) {
-		return new Promise((resolve, reject) => {
+	then(f: (s: fs.Stats | undefined) => any) {
+		return new Promise(resolve => {
 			if (!this.stat)
-				this.stat = fs.getStat(this.path);
+				this.stat = fs.promises.stat(this.path);
 			return resolve(this.stat.then(f));
 		});
 	}
@@ -437,19 +439,19 @@ export class Items {
 		const excludes	= exclude?.split(";");
 		for (let pattern of value.split(';')) {
 			if ((pattern = pattern.trim())) {
-				for (const filepath of await fs.search(path.resolve(basePath, pattern), excludes))
+				for (const filepath of await search(path.resolve(basePath, pattern), excludes))
 					this.includeFile(basePath, filepath, data, link);
 			}
 		}
 	}
 
 	public removeFiles(basePath: string, value: string) {
-		const exclude = new fs.Glob(value.split(";").map(s => path.join(basePath, s)));
+		const exclude = new Glob(value.split(";").map(s => path.join(basePath, s)));
 		this.entries = this.entries.filter(e => !exclude.test(e.data.fullPath));
 	}
 
 	public updateFiles(basePath: string, value: string, data: xml.Element, link?:string) {
-		const update	= new fs.Glob(value.split(";").map(s => path.join(basePath, s)));
+		const update	= new Glob(value.split(";").map(s => path.join(basePath, s)));
 		for (const entry of this.entries) {
 			if (update.test(entry.data.fullPath)) {
 				const relativePath 		= fixRelativePath(entry.data.relativePath, link);
@@ -554,7 +556,7 @@ export async function readItems(elements: xml.Element[], properties: PropertyCon
 					const sdk		= ParseSDKKey(include);
 					items.includePlain(sdk.identifier, item, {version: sdk.version});
 
-				} else if (name === "PackageReference" && item.attributes.Include && items.entries.length == 0 && await fs.exists(path.join(basepath, 'packages.config'))) {
+				} else if (name === "PackageReference" && item.attributes.Include && items.entries.length == 0 && await exists(path.join(basepath, 'packages.config'))) {
 					const config = await XMLCache.get(path.join(basepath, 'packages.config'));
 					if (config) {
 						for (const e of config.elements.packages.allElements())
@@ -591,7 +593,7 @@ export async function readItems(elements: xml.Element[], properties: PropertyCon
 //	Project
 //-----------------------------------------------------------------------------
 
-const MSBuildProperties : Properties = {
+const MSBuildProperties : Record<string, string> = {
 	VisualStudioVersion:			"17.0",
 	MSBuildToolsVersion:			"Current",
 	MSBuildToolsPath:				"$([MSBuild]::GetCurrentToolsDirectory())",
@@ -693,7 +695,7 @@ async function getExtAssoc(pp: Items) {
 	return ext_assoc;
 }
 
-export class Project {
+export class Container {
 	public	raw_xml?:	xml.Element;
 	public	items: 		Record<string, Items> 	= {};
 	public	imports:	Imports					= {all:[]};	//currently parsed imports
@@ -717,11 +719,11 @@ export class Project {
 		await xml_load(fullpath).then(xml => this.raw_xml = xml);
 	}
 
-	public async makeProjectProps(fullPath:string, globals: Properties) : Promise<PropertyContext> {
+	public async makeProjectProps(fullPath:string, globals: Record<string, string>) : Promise<PropertyContext> {
 		const properties = new PropertyContext;
 
 		//phase1 : Evaluate environment variables
-		properties.addDirect(Object.fromEntries(Object.keys(process.env).filter(k => /^[A-Za-z_]\w+$/.test(k)).map(k => [k, process.env[k]??'']))),
+		properties.addDirect(Object.fromEntries(Object.keys(process.env).filter(k => /^[A-Za-z_]\w+$/.test(k)).map(k => [k, process.env[k]??''])));
 
 		properties.addDirect(globals);
 		properties.setPath(fullPath);
