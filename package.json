@@ -1,6 +1,6 @@
 {
 	"name": "@isopodlabs/msbuild",
-	"version": "0.1.0",
+	"version": "0.1.1",
 	"description": "A package for reading and running MSBuild files with TypeScript.",
 	"repository": {
 		"type": "git",
@@ -34,6 +34,7 @@
 		"typescript-eslint": "^8.26.0"
 	},
 	"dependencies": {
+		"@isopodlabs/binary": "^1.4.3",
 		"@isopodlabs/binary_libs": "^1.2.0",
 		"@isopodlabs/registry": "^0.1.0",
 		"@isopodlabs/utilities": "^1.4.1",

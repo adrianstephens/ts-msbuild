@@ -4,41 +4,18 @@
     // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
     "version": "0.2.0",
     "configurations": [
-		{
-			"type": "node",
-			"request": "launch",
-			"name": "Launch make clean",
-			"program": "${workspaceFolder}/dist/cli.js",
-			"runtimeArgs": [
-				"--expose-internals"
-			],
-            "cwd": "${workspaceFolder}",
-            "args": ["-C", "test", "clean"],
-            "sourceMaps": true,
-            "smartStep": true,
-            "preLaunchTask": "npm: build",
-			"console": "integratedTerminal",
-		},
-		{
-			"type": "node",
-			"request": "launch",
-			"name": "Launch make all",
-			"program": "${workspaceFolder}/dist/cli.js",
-            "cwd": "${workspaceFolder}",
-            "args": ["-C", "test", "all"],
-            "sourceMaps": true,
-            "smartStep": true,
-            "preLaunchTask": "npm: build",
-			"console": "integratedTerminal",
-		},
         {
             "type": "node",
             "request": "launch",
-            "name": "Test make",
+            "name": "Test",
             "runtimeExecutable": "ts-node",
+			"env": {
+				"NODE_OPTIONS": "--preserve-symlinks"
+			},
             "cwd": "${workspaceFolder}/test",
             "args": ["test.ts"],
             "sourceMaps": true,
+			"outFiles": ["${workspaceFolder}/**/*.js"],
             "preLaunchTask": "npm: build",
 			"console": "integratedTerminal"
         },

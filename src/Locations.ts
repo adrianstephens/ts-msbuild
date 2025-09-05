@@ -1,3 +1,4 @@
+import * as fs from 'fs';
 import * as path from 'path';
 import * as utils from '@isopodlabs/utilities';
 import * as insensitive from '@isopodlabs/utilities/insensitive';
@@ -5,8 +6,15 @@ import {Version, sortByVersion} from './Version';
 import * as xml from '@isopodlabs/xml';
 import * as registry from '@isopodlabs/registry';
 import * as child_process from 'child_process';
-import { XMLCache, exists, directories, readDirectory } from './index';
+import { XMLCache, exists } from './index';
 
+export function readDirectory(file: string) {
+	return fs.promises.readdir(file, { withFileTypes: true }).catch(() => [] as fs.Dirent[]);
+}
+
+export function directories(files: fs.Dirent[]) {
+	return files.filter(i => i && i.isDirectory()).map(i => i.name);
+}
 
 export let vsdir	 = process.env.vsdir ?? '';
 if (!vsdir) GetFoldersInVSInstalls().then(vs => {

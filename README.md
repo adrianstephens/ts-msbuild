@@ -81,7 +81,7 @@ console.log('Output path:', props.properties.OutputPath);
 - [`Project`][Project] - Base project class with common functionality
 - `MsBuildProject` - MSBuild-based projects (.csproj, .vbproj, etc.)
 - [`PropertyContext`][PropertyContext] - MSBuild property evaluation engine
-- [`Items`][Items] - Project item collections (files, references, etc.)
+- `Items` - Project item collections (files, references, etc.)
 
 ## Supported Project Types
 
@@ -107,7 +107,6 @@ Built-in support for MSBuild expressions and functions:
 This project is licensed under the MIT License.
 
 <!-- Type References -->
-[Solution]: https://github.com/adrianstephens/ts-msbuild/blob/HEAD/src/Solution.ts#L239
-[Project]: https://github.com/adrianstephens/ts-msbuild/blob/HEAD/src/index.ts#L246
+[Solution]: https://github.com/adrianstephens/ts-msbuild/blob/HEAD/src/Solution.ts#L250
+[Project]: https://github.com/adrianstephens/ts-msbuild/blob/HEAD/src/Project.ts#L118
 [PropertyContext]: https://github.com/adrianstephens/ts-msbuild/blob/HEAD/src/MsBuild.ts#L37
-[Items]: https://github.com/adrianstephens/ts-msbuild/blob/HEAD/src/MsBuild.ts#L355

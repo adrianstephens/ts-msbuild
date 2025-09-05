@@ -4,9 +4,20 @@ import * as crypto from 'crypto';
 import * as binary from '@isopodlabs/binary';
 import * as CompDoc from '@isopodlabs/binary_libs/CompoundDocument';
 import * as utils from '@isopodlabs/utilities';
-import { Project, ProjectItemEntry, known_guids } from './index';
+import { Project, ProjectItemEntry, createProject, getProjectTypeFromExt, addKnownProjects } from './Project';
 
 export class NonMSBuildProject extends Project {
+	public solutionRead(m: string[], _basePath: string) {
+		if (m[1] === "ProjectSection(ProjectDependencies)") {
+			return (s: string) => {
+				const m = assign_re.exec(s);
+				if (m)
+					this.addDependency(Project.getFromId(m[1]));
+			};
+		}
+	}
+
+
 	public solutionWrite(_basePath: string) : string {
 		return write_section('ProjectSection', 'ProjectDependencies', 'preProject', Object.fromEntries(this.dependencies.map(i => [i.name, i.name])));
 	}
@@ -89,25 +100,25 @@ export class WebProject extends NonMSBuildProject {
 export class WebDeploymentProject extends Project {
 }
 
-Object.assign(known_guids, {
-	/*Web Site*/			"{E24C65DC-7377-472B-9ABA-BC803B73C61A}": {make: WebProject},
-	/*Solution Folder*/		"{2150E333-8FDC-42A3-9474-1A3956D46DE8}": {make: SolutionFolder,					icon:"FolderClosed"},
-	/*wdProjectGuid*/ 		"{2CFEAB61-6A3B-4EB8-B523-560B4BEEF521}": {make: WebDeploymentProject},
+addKnownProjects({
+	/*CRM*/	                	"{88A30576-7583-4F75-8136-5EFD2C14ADFF}": {make: NonMSBuildProject},	
+	/*CRM plugin*/	         	"{4C25E9B5-9FA6-436C-8E19-B395D2A65FAF}": {make: NonMSBuildProject},	
+	/*IL project*/	         	"{95DFC527-4DC1-495E-97D7-E94EE1F7140D}": {make: NonMSBuildProject},	
+	/*InstallShield*/	      	"{FBB4BD86-BF63-432A-A6FB-6CF3A1288F83}": {make: NonMSBuildProject},	
+	/*LightSwitch Project*/		"{ECD6D718-D1CF-4119-97F3-97C25A0DFBF9}": {make: NonMSBuildProject},	
+	/*Micro Framework*/	    	"{B69E3092-B931-443C-ABE7-7E7B65F2A37F}": {make: NonMSBuildProject},	
+	/*Miscellaneous Files*/		"{66A2671D-8FB5-11D2-AA7E-00C04F688DDE}": {make: NonMSBuildProject},	
+	/*Nomad*/	              	"{4B160523-D178-4405-B438-79FB67C8D499}": {make: NonMSBuildProject},	
+	/*Synergex*/	           	"{BBD0F5D1-1CC4-42FD-BA4C-A96779C64378}": {make: NonMSBuildProject},	
+	/*Unloaded Project*/	   	"{67294A52-A4F0-11D2-AA88-00C04F688DDE}": {make: NonMSBuildProject},	
+	/*WiX Setup*/	          	"{930C7802-8A8C-48F9-8165-68863BCCD9DD}": {make: NonMSBuildProject},	
+
+	/*Web Site*/				"{E24C65DC-7377-472B-9ABA-BC803B73C61A}": {make: WebProject},
+	/*Solution Folder*/			"{2150E333-8FDC-42A3-9474-1A3956D46DE8}": {make: SolutionFolder,					type: "Folder"},
+	/*wdProjectGuid*/ 			"{2CFEAB61-6A3B-4EB8-B523-560B4BEEF521}": {make: WebDeploymentProject},
 });
 
-const known_exts = Object.fromEntries(Object.entries(known_guids).filter(([_, v]) => v.ext).map(([k, v]) => [v.ext!, k]));
 
-function createProject(parent: Solution, type: string, name: string, fullpath: string, guid: string) {
-	const basePath 	= path.dirname(parent.fullpath);
-	const known 	= known_guids[type];
-	return known
-		? new known.make(parent, type, name, fullpath, guid, basePath)
-		: new Project(parent, type, name, fullpath, guid, basePath);
-}
-
-export function getProjectIconName(guid: string) : string | undefined {
-	return known_guids[guid]?.icon;
-}
 
 class Histogram {
 	private data: Record<string, number> = {};
@@ -325,30 +336,39 @@ export class Solution {
 		return Object.keys(this.projects).filter(p => !this.parents[p]).map(p => this.projects[p]);
 	}
 
-	dispose() {
-		utils.asyncMap(Object.keys(this.projects), async k => this.projects[k].clean());
-	}
 
 	private constructor(public fullpath: string) {
 	}
 
-	private static async getParser(fullpath: string) {
-		const bytes		= await fs.promises.readFile(fullpath);
-		if (bytes) {
-			const content	= new TextDecoder().decode(bytes);
-			const parser	= new LineParser(content.split('\n'));
+	dispose() {
+		utils.asyncMap(Object.keys(this.projects), async k => this.projects[k].clean());
+	}
 
-			const slnFileHeaderNoVersion = "Microsoft Visual Studio Solution File, Format Version ";
-			for (let i = 0; i < 2; i++) {
-				const str = parser.readLine();
-				if (str && str.startsWith(slnFileHeaderNoVersion))
-					return parser;
-			}
-		}
+	public dirty() {
+		this.update.trigger();
+	}
+
+	private dirty_suo() {
+		this.update_suo.trigger();
 	}
 
 	public static async load(fullpath: string) : Promise<Solution | undefined> {
-		const parser = await this.getParser(fullpath);
+		async function getParser() {
+			const bytes		= await fs.promises.readFile(fullpath);
+			if (bytes) {
+				const content	= new TextDecoder().decode(bytes);
+				const parser	= new LineParser(content.split('\n'));
+
+				const slnFileHeaderNoVersion = "Microsoft Visual Studio Solution File, Format Version ";
+				for (let i = 0; i < 2; i++) {
+					const str = parser.readLine();
+					if (str && str.startsWith(slnFileHeaderNoVersion))
+						return parser;
+				}
+			}
+		}
+
+		const parser = await getParser();
 		if (parser) {
 			const solution = new Solution(fullpath);
 
@@ -375,14 +395,6 @@ export class Solution {
 			solution.active	= [Math.max(solution.config_list.indexOf(parts[0]), 0), Math.max(solution.platform_list.indexOf(parts[1]), 0)];
 			return solution;
 		}
-	}
-
-	public dirty() {
-		this.update.trigger();
-	}
-
-	private dirty_suo() {
-		this.update_suo.trigger();
 	}
 
 	private parse(parser : LineParser): void {
@@ -413,7 +425,7 @@ export class Solution {
 					const type = m[1];
 					if ((m = /"(.*)"\s*,\s*"(.*)"\s*,\s*"(.*)"/.exec(value))) {
 						const guid 	= m[3];
-						const proj 	= Project.all[guid] ?? createProject(this, type, m[1], path.resolve(basePath, m[2]), guid);
+						const proj 	= Project.getFromId(guid) ?? createProject(this, type, m[1], path.resolve(basePath, m[2]), guid);
 						this.projects[guid] = proj;
 
 						parser.parseSection_re("EndProject", assign_re, m => {
@@ -480,11 +492,10 @@ export class Solution {
 
 	private format(): string {
 		const basePath = path.dirname(this.fullpath);
-		let out = `
-${this.header}
-VisualStudioVersion = ${this.VisualStudioVersion}
-MinimumVisualStudioVersion = ${this.MinimumVisualStudioVersion}
-`;
+
+		let out = '\n' + this.header
+			+ `\nVisualStudioVersion = ${this.VisualStudioVersion}`
+			+ `\nMinimumVisualStudioVersion = ${this.MinimumVisualStudioVersion}`;
 
 		for (const p in this.projects) {
 			const proj = this.projects[p];
@@ -500,6 +511,7 @@ MinimumVisualStudioVersion = ${this.MinimumVisualStudioVersion}
 				case 'SolutionConfigurationPlatforms':
 					section = Object.fromEntries(this.config_list.map(c => this.platform_list.map(p => `${c}|${p}`)).flat().map(i => [i, i]));
 					break;
+
 				case 'ProjectConfigurationPlatforms':
 					section = Object.entries(this.projects).reduce((acc, [p, project]) =>
 						Object.entries(project.configuration).reduce((acc, [i, c]) => {
@@ -516,6 +528,7 @@ MinimumVisualStudioVersion = ${this.MinimumVisualStudioVersion}
 							return acc;
 						}, acc), {} as Record<string, string>);
 					break;
+
 				case 'NestedProjects':
 					section = Object.entries(this.projects).reduce((acc, [p, project]) =>
 						project.childProjects.reduce((acc, i) => {
@@ -523,6 +536,7 @@ MinimumVisualStudioVersion = ${this.MinimumVisualStudioVersion}
 							return acc;
 						}, acc), {} as Record<string, string>);
 					break;
+
 				default:
 					break;
 			}
@@ -554,13 +568,13 @@ MinimumVisualStudioVersion = ${this.MinimumVisualStudioVersion}
 			}
 		});
 	}
-
 	public configurationList() : string[] {
 		return this.makeProxy(this.config_list);
 	}
 	public platformList() : string[] {
 		return this.makeProxy(this.platform_list);
 	}
+
 	public async addProject(proj: Project) {
 		if (!proj.guid)
 			proj.guid = crypto.randomUUID();
@@ -611,8 +625,12 @@ MinimumVisualStudioVersion = ${this.MinimumVisualStudioVersion}
 
 	public async addProjectFilename(filename: string) {
 		const parsed	= path.parse(filename);
-		const type		= known_exts[parsed.ext.substring(1)];
-		this.addProject(createProject(this, type, parsed.name, filename, ''));
+		const type		= getProjectTypeFromExt(parsed.ext);
+		if (type) {
+			const project = createProject(this, type, parsed.name, filename, '');
+			this.addProject(project);
+			return project;
+		}
 	}
 
 	public removeProject(project: Project) {
