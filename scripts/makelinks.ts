@@ -36,8 +36,8 @@ function removeLinks(readme: string) {
 	});
 }
 
-function addLinks(readme: string, types: Map<string, string>) {
-	const baseUrl = 'https://github.com/adrianstephens/ts-make/blob/HEAD/';
+function addLinks(readme: string, types: Map<string, string>, baseUrl: string) {
+//	const baseUrl = 'https://github.com/adrianstephens/ts-make/blob/HEAD/';
 	const used = new Set<string>();
 	
 	// Add links for type names and collect references
@@ -72,9 +72,11 @@ function addLinks(readme: string, types: Map<string, string>) {
 	return readme;
 }
 
+const baseUrl = process.argv[2];
+
 // Usage
 const types = extractAllTypes('src');
 const readme = fs.readFileSync('nolinks.README.md', 'utf8');
 //const updated = removeLinks(readme);
-const updated = addLinks(removeLinks(readme), types);
+const updated = addLinks(removeLinks(readme), types, baseUrl);
 fs.writeFileSync('README.md', updated);

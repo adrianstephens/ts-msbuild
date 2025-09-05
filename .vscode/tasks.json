@@ -12,7 +12,7 @@
 		{
 			"type": "shell",
 			"label": "makelinks",
-			"command": "ts-node ./scripts/makelinks.ts",
+			"command": "ts-node ./scripts/makelinks.ts https://github.com/adrianstephens/ts-msbuild/blob/HEAD/",
 		},
 		{
 			"type": "shell",

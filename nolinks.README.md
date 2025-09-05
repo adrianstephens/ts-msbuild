@@ -77,11 +77,11 @@ console.log('Output path:', props.properties.OutputPath);
 ## API Reference
 
 ### Core Classes
-- [`Solution`][Solution] - Visual Studio solution parser and manager
-- [`Project`][Project] - Base project class with common functionality
+- `Solution` - Visual Studio solution parser and manager
+- `Project` - Base project class with common functionality
 - `MsBuildProject` - MSBuild-based projects (.csproj, .vbproj, etc.)
-- [`PropertyContext`][PropertyContext] - MSBuild property evaluation engine
-- [`Items`][Items] - Project item collections (files, references, etc.)
+- `PropertyContext` - MSBuild property evaluation engine
+- `Items` - Project item collections (files, references, etc.)
 
 ## Supported Project Types
 
@@ -105,9 +105,3 @@ Built-in support for MSBuild expressions and functions:
 ## License
 
 This project is licensed under the MIT License.
-
-<!-- Type References -->
-[Solution]: https://github.com/adrianstephens/ts-msbuild/blob/HEAD/src/Solution.ts#L239
-[Project]: https://github.com/adrianstephens/ts-msbuild/blob/HEAD/src/index.ts#L246
-[PropertyContext]: https://github.com/adrianstephens/ts-msbuild/blob/HEAD/src/MsBuild.ts#L37
-[Items]: https://github.com/adrianstephens/ts-msbuild/blob/HEAD/src/MsBuild.ts#L355

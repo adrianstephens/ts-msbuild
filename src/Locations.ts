@@ -1,6 +1,6 @@
 import * as path from 'path';
 import * as utils from '@isopodlabs/utilities';
-import {insensitive} from '@isopodlabs/utilities';
+import * as insensitive from '@isopodlabs/utilities/insensitive';
 import {Version, sortByVersion} from './Version';
 import * as xml from '@isopodlabs/xml';
 import * as registry from '@isopodlabs/registry';
@@ -74,7 +74,7 @@ export const assemblyFolders = new utils.Lazy(async ()=> {
 function MatchingPlatformExists(platform: string, platformValue?: string) {
 	if (platformValue) {
 		for (const p of platformValue.split(';')) {
-			if (utils.insensitive.compare(p, platform) == 0)
+			if (insensitive.compare(p, platform) == 0)
 				return true;
 		}
 	}

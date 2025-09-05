@@ -4,7 +4,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as registry from '@isopodlabs/registry';
 import * as utils from '@isopodlabs/utilities';
-import {insensitive} from '@isopodlabs/utilities';
+import * as insensitive from '@isopodlabs/utilities/insensitive';
 import {Version, version_compare, extendVersion} from './Version';
 import * as Locations from './Locations';
 import {search, exists} from './index';
