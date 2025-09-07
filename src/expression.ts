@@ -450,12 +450,12 @@ class Microsoft_Build_Utilities_ToolLocationHelper extends StaticFunctions {
 	}
 	
 	static async GetPlatformSDKDisplayName(Identifier: string, Version: string, diskRoots?: string, registryRoot?: string) {
-		const sdk = await Locations.GetMatchingPlatformSDK(Identifier, Version, diskRoots?.split(';') ?? await Locations.sdkRoots.value, registryRoot ?? this.defaultRegistryRoot);
+		const sdk = await Locations.GetMatchingPlatformSDK(Identifier, Version, diskRoots?.split(';') ?? await Locations.sdkRoots, registryRoot ?? this.defaultRegistryRoot);
 		return (await sdk?.manifest)?.attributes.DisplayName ?? `${Identifier} ${Version}`;
 	}
 
 	static async GetPlatformSDKLocation(Identifier: string, Version: string, diskRoots?: string, registryRoot?: string) {
-		const sdk = await Locations.GetMatchingPlatformSDK(Identifier, Version, diskRoots?.split(';') ??  await Locations.sdkRoots.value, registryRoot ?? this.defaultRegistryRoot);
+		const sdk = await Locations.GetMatchingPlatformSDK(Identifier, Version, diskRoots?.split(';') ?? await Locations.sdkRoots, registryRoot ?? this.defaultRegistryRoot);
 		return sdk?._path ?? '';
 	}
 	
@@ -463,12 +463,12 @@ class Microsoft_Build_Utilities_ToolLocationHelper extends StaticFunctions {
 		const version = Version.parse(sdkVersion);
 		if (version) {
 			if (sdkRoots.length == 0)
-				sdkRoots = await Locations.sdkRoots.value;
-			const SDKs		= await Locations.RetrieveTargetPlatformList(sdkRoots, this.defaultRegistryRoot);
+				sdkRoots = await Locations.sdkRoots;
+			const SDKs	= await Locations.RetrieveTargetPlatformList(sdkRoots, this.defaultRegistryRoot);
 			const platforms: string[] = [];
 			for (const sdk of SDKs) {
 				if (insensitive.compare(sdk.platform, sdkIdentifier) == 0 && sdk.version.compare(version) == 0 && sdk.Platforms)
-					utils.arrayAppend(platforms, Object.keys(sdk.Platforms));
+					platforms.push(... Object.keys(sdk.Platforms));
 			}
 			return platforms.map(i => Version.parse(i)).filter(i => !!i).reduce((acc, v) => v.compare(acc) > 0 ? v : acc, new Version);
 		}

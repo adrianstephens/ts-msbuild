@@ -115,39 +115,57 @@ export interface ProjectConfiguration {
 	deploy:			boolean
 }
 
-export class Project {
+export interface ProjectContainer {
+	basedir: string;
+	dirty(): void;
+}
+
+export abstract class Project {
 	private static all: Record<string, Project> = {};
 	public static getFromId(id: string): Project | undefined {
 		return Project.all[id.toUpperCase()];
 	}
 
+//	public _onChange = new EventEmitter<string>();
+	protected solution_dir: string;
 	public dependencies:	Project[] = [];
 	public childProjects:	Project[] = [];
 	public configuration:	Record<string, ProjectConfiguration> = {};
 	public ready: 			Promise<void> = Promise.resolve();
 
-	constructor(_parent: any, public type:string, public name:string, public fullpath:string, public guid:string, protected solution_dir: string) {
+	constructor(container: ProjectContainer, public type:string, public name:string, public fullpath:string, public guid:string) {
+		this.solution_dir = container.basedir;
 		Project.all[this.guid] = this;
 	}
 
-	public solutionRead(_m: string[], _basePath: string): ((line: string) => void) | undefined {
-		return undefined;
+	get shortType() {
+		return known_guids[this.type]?.type;
 	}
 
-	public solutionWrite(_basePath: string) : string {
-		return '';
-	}
+//	get onChange() { return this._onChange.on.bind(this._onChange); }
+//	dirty(): void {this._onChange.emit(this.fullpath);}
+
+
+	//reload
+	abstract load() : Promise<void>;
+	//save if changed
+	abstract  save(): Promise<void>;
+
+	abstract solutionRead(_m: string[], _basePath: string): ((line: string) => void) | undefined;
+	abstract solutionWrite(_basePath: string) : string;
+
+	abstract addFile(name: string, filepath: string): boolean;
+	abstract removeFile(file: string): boolean;
+	abstract removeFolder(folder: Folder): boolean;
+	abstract removeEntry(entry: ProjectItemEntry): boolean;
+
+	abstract getFolders(view: string): Promise<FolderTree>;
+
+	// final implementations
 
 	public addDependency(proj: Project | undefined): void {
 		if (proj && this.dependencies.indexOf(proj) === -1)
 			this.dependencies.push(proj);
-	}
-
-	public addFile(name: string, filepath: string, _markDirty = true): boolean {
-		return false;
-	}
-	public removeFile(_file: string) {
-		return false;
 	}
 
 	public addProject(project?: Project): void {
@@ -169,12 +187,38 @@ export class Project {
 		return [...new Set(Object.values(this.configuration).map(i => i.Platform))];
 	}
 
-	dirty(): void {}
-	clean(): void {}
 }
 
+class UnknownProject extends Project {
+	async load() {}
+	async save() {}
+	solutionRead(_m: string[], _basePath: string) : ((line: string) => void) | undefined {
+		return undefined;
+	}
+	solutionWrite(_basePath: string) : string {
+		return '';
+	}
+	addFile(_name: string, _filepath: string): boolean {
+		return false;
+	}
+	removeFile(_file: string): boolean {
+		return false;
+	}
+	removeEntry(_entry: ProjectItemEntry): boolean {
+		return false;
+	}
+	removeFolder(_folder: Folder): boolean {
+		return false;
+	}
+
+	getFolders(_view: string) {
+		return Promise.resolve(new FolderTree());
+	}
+}
+
+
 interface KnownProjectEntry {
-	make:	new (parent: any, type: string, name: string, fullpath: string, guid: string, solution_dir: string)=>Project,
+	make:	new (container: ProjectContainer, type: string, name: string, fullpath: string, guid: string)=>Project,
 	type?:	string,
 	ext?:	string,
 }
@@ -186,12 +230,9 @@ export function addKnownProjects(known: Record<string, KnownProjectEntry>) {
 	Object.assign(known_guids, known);
 }
 
-export function createProject(parent: any, type: string, name: string, fullpath: string, guid: string) {
-	const basePath 	= path.dirname(parent.fullpath);
-	const known 	= known_guids[type];
-	return known
-		? new known.make(parent, type, name, fullpath, guid, basePath)
-		: new Project(parent, type, name, fullpath, guid, basePath);
+export function createProject(container: ProjectContainer, type: string, name: string, fullpath: string, guid: string) {
+	const constructor 	= known_guids[type]?.make ?? UnknownProject;
+	return new constructor(container, type, name, fullpath, guid);
 }
 
 export function getProjectType(guid: string) : string | undefined {

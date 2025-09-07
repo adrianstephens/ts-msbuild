@@ -79,9 +79,9 @@ console.log('Output path:', props.properties.OutputPath);
 ### Core Classes
 - [`Solution`][Solution] - Visual Studio solution parser and manager
 - [`Project`][Project] - Base project class with common functionality
-- `MsBuildProject` - MSBuild-based projects (.csproj, .vbproj, etc.)
+- [`MsBuildProject`][MsBuildProject] - MSBuild-based projects (.csproj, .vbproj, etc.)
 - [`PropertyContext`][PropertyContext] - MSBuild property evaluation engine
-- `Items` - Project item collections (files, references, etc.)
+- [`Items`][Items] - Project item collections (files, references, etc.)
 
 ## Supported Project Types
 
@@ -107,6 +107,8 @@ Built-in support for MSBuild expressions and functions:
 This project is licensed under the MIT License.
 
 <!-- Type References -->
-[Solution]: https://github.com/adrianstephens/ts-msbuild/blob/HEAD/src/Solution.ts#L250
-[Project]: https://github.com/adrianstephens/ts-msbuild/blob/HEAD/src/Project.ts#L118
-[PropertyContext]: https://github.com/adrianstephens/ts-msbuild/blob/HEAD/src/MsBuild.ts#L37
+[Solution]: https://github.com/adrianstephens/ts-msbuild/blob/HEAD/src/Solution.ts#L283
+[Project]: https://github.com/adrianstephens/ts-msbuild/blob/HEAD/src/Project.ts#L123
+[MsBuildProject]: https://github.com/adrianstephens/ts-msbuild/blob/HEAD/src/MsBuild.ts#L1044
+[PropertyContext]: https://github.com/adrianstephens/ts-msbuild/blob/HEAD/src/MsBuild.ts#L28
+[Items]: https://github.com/adrianstephens/ts-msbuild/blob/HEAD/src/MsBuild.ts#L340

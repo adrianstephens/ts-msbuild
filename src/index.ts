@@ -3,8 +3,10 @@ import * as path from 'path';
 import * as utils from '@isopodlabs/utilities';
 import * as xml from '@isopodlabs/xml';
 
-export { Solution } from './Solution';
-export { PropertyContext, Origins } from './MsBuild';
+export { Project, Folder, FolderTree, ProjectItemEntry, makeFileEntry } from './Project';
+export { Solution, SolutionFolder } from './Solution';
+export { MsBuildBase, MsBuildProject, Items, PropertyContext, Origins } from './MsBuild';
+export * as Locations from './Locations';
 
 //-----------------------------------------------------------------------------
 //	fs helpers
@@ -112,7 +114,7 @@ export async function search(pattern: string, _exclude?:string | string[], onlyf
 //-----------------------------------------------------------------------------
 
 export async function xml_load(filename : string) : Promise<xml.Element | undefined> {
-	return fs.promises.readFile(filename, "utf-8").then(content	=> content ? xml.parse(content) : undefined);
+	return fs.promises.readFile(filename, "utf-8").then(content	=> xml.parse(content)).catch(() => undefined);
 }
 
 export async function xml_save(filename : string, element: xml.Element) : Promise<void> {

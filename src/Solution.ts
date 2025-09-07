@@ -4,9 +4,14 @@ import * as crypto from 'crypto';
 import * as binary from '@isopodlabs/binary';
 import * as CompDoc from '@isopodlabs/binary_libs/CompoundDocument';
 import * as utils from '@isopodlabs/utilities';
-import { Project, ProjectItemEntry, createProject, getProjectTypeFromExt, addKnownProjects } from './Project';
+import { ProjectContainer, Project, ProjectItemEntry, createProject, Folder, FolderTree, getProjectTypeFromExt, addKnownProjects } from './Project';
 
-export class NonMSBuildProject extends Project {
+class NonMSBuildProject extends Project {
+	async load() {}
+	async save() {}
+	addFile(_name: string, _filepath: string): boolean { return false; }
+	removeFile(_file: string): boolean { return false; }
+
 	public solutionRead(m: string[], _basePath: string) {
 		if (m[1] === "ProjectSection(ProjectDependencies)") {
 			return (s: string) => {
@@ -21,25 +26,40 @@ export class NonMSBuildProject extends Project {
 	public solutionWrite(_basePath: string) : string {
 		return write_section('ProjectSection', 'ProjectDependencies', 'preProject', Object.fromEntries(this.dependencies.map(i => [i.name, i.name])));
 	}
+
+	public removeFolder(_folder: Folder): boolean {
+		return false;
+	}
+	public removeEntry(_entry: ProjectItemEntry): boolean {
+		return false;
+	}
+	public getFolders(_view: string) : Promise<FolderTree> {
+		return Promise.resolve(new FolderTree);
+	}
+
 }
 
 export class SolutionFolder extends NonMSBuildProject {
 	public solutionItems: ProjectItemEntry[] = [];
 
-	constructor(public parent:Solution, public type:string, public name:string, public fullpath:string, public guid:string, protected solution_dir: string) {
-		super(parent, type, name, fullpath, guid, solution_dir);
-	}
-
-	public dirty() {
-		this.parent.dirty();
+	constructor(public container: ProjectContainer, type:string, name:string, fullpath: string, guid: string) {
+		super(container, type, name, fullpath, guid);
 	}
 
 	public solutionRead(m: string[], basePath: string) {
 		if (m[1] === "ProjectSection(SolutionItems)") {
 			return (s: string) => {
 				const m = assign_re.exec(s);
-				if (m)
-					this.addFile(path.basename(m[1]), path.resolve(basePath, m[2].trim()), false);
+				if (m) {
+					const filepath = path.resolve(basePath, m[2].trim());
+					this.solutionItems.push( {
+						name: path.basename(m[1]),
+						data: {
+							fullPath: filepath,
+							relativePath: path.relative(this.fullpath, filepath),
+						}
+					});
+				}
 			};
 		}
 	}
@@ -50,7 +70,7 @@ export class SolutionFolder extends NonMSBuildProject {
 		})));
 	}
 
-	public addFile(name: string, filepath: string, markDirty: boolean): boolean {
+	public addFile(name: string, filepath: string): boolean {
 		this.solutionItems.push( {
 			name: name,
 			data: {
@@ -58,25 +78,31 @@ export class SolutionFolder extends NonMSBuildProject {
 				relativePath: path.relative(this.fullpath, filepath),
 			}
 		});
-		if (markDirty)
-			this.dirty();
+		this.container.dirty();
 		return true;
 	}
 	
 	public removeEntry(entry: ProjectItemEntry): boolean {
-		this.dirty();
-		return utils.arrayRemove(this.solutionItems, entry);
+		if (utils.arrayRemove(this.solutionItems, entry)) {
+			this.container.dirty();
+			return true;
+		}
+		return false;
 	}
 	
 	public removeFile(file: string): boolean {
 		const index = this.solutionItems.findIndex(i => i.data.fullPath == file);
 		if (index != -1) {
 			this.solutionItems.splice(index, 1);
-			this.dirty();
+			this.container.dirty();
 			return true;
 		}
 		return false;
 	}
+	public getFolders(_view: string) : Promise<FolderTree> {
+		return Promise.resolve(new FolderTree(new Folder('', this.solutionItems)));
+	}
+
 }
 
 export class WebProject extends NonMSBuildProject {
@@ -95,9 +121,16 @@ export class WebProject extends NonMSBuildProject {
 			};
 		}
 	}
+	public getFolders(_view: string) {
+		return Promise.resolve(new FolderTree());
+	}
+
 }
 
-export class WebDeploymentProject extends Project {
+export class WebDeploymentProject extends NonMSBuildProject {
+	public getFolders(_view: string) {
+		return Promise.resolve(new FolderTree());
+	}
 }
 
 addKnownProjects({
@@ -247,7 +280,7 @@ function suo_path(filename: string) {
 //	Solution
 //-----------------------------------------------------------------------------
 
-export class Solution {
+export class Solution implements ProjectContainer {
 	public projects:		Record<string, Project> = {};
 	public parents:			Record<string, Project> = {};
 	public debug_include:	string[]	= [];
@@ -262,29 +295,8 @@ export class Solution {
 	private global_sections: Record<string, {section: Record<string, string>, when:string}> = {};
 	private	active						= [0, 0];
 	private	config:			Record<string, any> = {};
-	private writing			= false;
-
-
-	update = new utils.CallCombiner(async () => {
-		this.writing = true;
-		await fs.promises.writeFile(this.fullpath, this.format());
-		setTimeout(() => this.writing = false, 1000);
-	}, 2000);
-
-	update_suo = new utils.CallCombiner(async () => {
-		const suopath = suo_path(this.fullpath);
-		open_suo(suopath).then(suo => {
-			const configStream = suo.find("SolutionConfiguration");
-			if (configStream) {
-				const config	= this.config;
-				const data2 	= write_config(config);
-				const config2	= read_config(data2);
-				console.log(config2.toString());
-				suo.write(configStream, data2);
-				suo.flush(suopath);
-			}
-		});
-	}, 2000);
+	private _dirty			= false;
+	private _dirty_suo		= false;
 
 	public get startup() : Project | undefined {
 		return this.projects[this.config.StartupProject];
@@ -336,23 +348,47 @@ export class Solution {
 		return Object.keys(this.projects).filter(p => !this.parents[p]).map(p => this.projects[p]);
 	}
 
+	public get basedir() {
+		return path.dirname(this.fullpath);
+	}
 
-	private constructor(public fullpath: string) {
+	protected constructor(public fullpath: string) {
 	}
 
 	dispose() {
-		utils.asyncMap(Object.keys(this.projects), async k => this.projects[k].clean());
+		utils.asyncMap(Object.keys(this.projects), async k => this.projects[k].save());
 	}
 
 	public dirty() {
-		this.update.trigger();
+		this._dirty = true;
 	}
 
 	private dirty_suo() {
-		this.update_suo.trigger();
+		this._dirty_suo = true;
 	}
 
-	public static async load(fullpath: string) : Promise<Solution | undefined> {
+	async save() {
+		if (this._dirty_suo) {
+			const suopath = suo_path(this.fullpath);
+			open_suo(suopath).then(suo => {
+				const configStream = suo.find("SolutionConfiguration");
+				if (configStream) {
+					const config	= this.config;
+					const data2 	= write_config(config);
+					const config2	= read_config(data2);
+					console.log(config2.toString());
+					suo.write(configStream, data2);
+					suo.flush(suopath);
+				}
+			});
+		}
+		if (this._dirty)
+			await fs.promises.writeFile(this.fullpath, this.format());
+
+	}
+
+//	static async load<T extends Solution>(this: new (fullpath: string) => T, fullpath: string): Promise<T | undefined> {
+	static async load(fullpath: string): Promise<Solution | undefined> {
 		async function getParser() {
 			const bytes		= await fs.promises.readFile(fullpath);
 			if (bytes) {
@@ -370,7 +406,7 @@ export class Solution {
 
 		const parser = await getParser();
 		if (parser) {
-			const solution = new Solution(fullpath);
+			const solution = new this(fullpath);
 
 			const aconfig = open_suo(suo_path(fullpath)).then(suo => {
 				const sourceStream = suo.find("DebuggerFindSource");
@@ -397,7 +433,7 @@ export class Solution {
 		}
 	}
 
-	private parse(parser : LineParser): void {
+	private parse(parser : LineParser) {
 		this.header						= parser.currentLine();
 		this.config_list.length 		= 0;
 		this.platform_list.length 		= 0;
