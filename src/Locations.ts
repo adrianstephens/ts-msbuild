@@ -118,7 +118,7 @@ export async function getMSBuildRuntimeVersionFromFS(): Promise<string> {
 export const assemblyFolders = new utils.Lazy(async ()=> {
 
 	async function FoldersFromRegistryKey(baseKey: registry.Key) {
-		return utils.asyncReduce(Object.values(baseKey), async (directories, product) => {
+		return utils.async.reduce(Object.values(baseKey), async (directories, product) => {
 			const folder = (await product).values['']?.toString();
 			if (folder && await exists(folder))
 				directories[product.name] = folder;
@@ -273,7 +273,7 @@ class Manifest {
 //TargetFramework 		=".NETCore, version=v4.5.3;"
 //SupportPrefer32Bit  	="True"
 //MoreInfo				="http://go.microsoft.com/fwlink/?LinkId=517639">
-		this.ApiContracts	= utils.mapIterable(x.elements.ContainedApiContracts?.elements.ApiContract,
+		this.ApiContracts	= utils.map(x.elements.ContainedApiContracts?.elements.ApiContract,
 			e => new ApiContract(e.attributes.name, e.attributes.version)
 		);
 	}
@@ -307,8 +307,8 @@ class SDKDirectories {
 	}
 
 	async Gather(root: string, manifest: string) {
-		return utils.asyncMap(directories(await readDirectory(root)), async i =>
-			utils.asyncMap(directories(await readDirectory(path.join(root, i))), async j =>
+		return utils.async.map(directories(await readDirectory(root)), async i =>
+			utils.async.map(directories(await readDirectory(path.join(root, i))), async j =>
 				Version.parse(j) && this.Add(path.join(root, i, j), i, j, manifest)
 			)
 		);
@@ -377,7 +377,7 @@ function SortVersionStrings(targetVersion: Version|undefined, versions: string[]
 async function GatherSDKListFromDirectory(platform: string, fullpath: string, platformSDKs: Record<string, TargetPlatformSDK>) {
 	const sortedVersions = SortVersionStrings(undefined, directories(await readDirectory(fullpath)));
 
-	return utils.asyncMap(sortedVersions, async i => {
+	return utils.async.map(sortedVersions, async i => {
 		const	SDKplatform	= insensitive.compare(platform, 'Windows Kits') == 0 && i[0].major == 10 ? 'Windows' : platform;
 		const	key		= MakeSDKKey(SDKplatform, i[0].toString());
 		let		SDK:	TargetPlatformSDK | undefined;
@@ -399,9 +399,9 @@ async function GatherSDKListFromDirectory(platform: string, fullpath: string, pl
 }
 
 async function GatherSDKListFromRegistry(platform: string, baseKey: registry.Key, platformSDKs: Record<string, TargetPlatformSDK>) {
-	const sortedVersions = SortVersionStrings(undefined, utils.mapIterable(baseKey, i => i.name));
+	const sortedVersions = SortVersionStrings(undefined, utils.map(baseKey, i => i.name));
 
-	return utils.asyncMap(sortedVersions, async i => {
+	return utils.async.map(sortedVersions, async i => {
 		const	key	= MakeSDKKey(platform, i[0].toString());
 		let		SDK: TargetPlatformSDK | undefined;
 
@@ -418,8 +418,8 @@ async function GatherSDKListFromRegistry(platform: string, baseKey: registry.Key
 				await SDK.Platforms.Gather(Path, "Platform.xml");
 
 				const ExtensionSDKs = SDK.ExtensionSDKs;
-				await utils.asyncMap(await reg.ExtensionSDKs, async (sdk: registry.KeyPromise) =>
-					utils.asyncMap(await sdk, async sdkVersion => {
+				await utils.async.map(await reg.ExtensionSDKs, async (sdk: registry.KeyPromise) =>
+					utils.async.map(await sdk, async sdkVersion => {
 						if (Version.parse(sdkVersion.name)) {
 							const directoryName = (await sdkVersion).values[''];
 							if (directoryName)
@@ -477,7 +477,7 @@ export const WindowsKits = new utils.Lazy(async () => {
 export const sdkRoots = new utils.Lazy(async () => {
 	const envRoots = process.env.MSBUILDSDKREFERENCEDIRECTORY;
 	if (envRoots) {
-		const roots = await utils.asyncFilter(envRoots.split(';').map(i => i.trim()), async i => await exists(i));
+		const roots = await utils.async.filter(envRoots.split(';').map(i => i.trim()), async i => await exists(i));
 		if (roots.length)
 			return roots;
 	}
@@ -492,7 +492,7 @@ export const sdkRoots = new utils.Lazy(async () => {
 		"dotnet/sdk",
 	];
 
-	return utils.asyncFilter(
+	return utils.async.filter(
 		defaultRoots.filter(Boolean).map(i => folders.map(j => path.join(i!, j))).flat(),
 		async i => await exists(i)
 	);
@@ -505,14 +505,14 @@ export function RetrieveTargetPlatformList(diskRoots: string[], registryRoot: st
 	if (!collection) {
 		cachedTargetPlatforms[key] = collection  = (async () => {
 			const sdks: Record<string, TargetPlatformSDK> = {};
-			await utils.asyncMap(diskRoots, async i => 
-				utils.asyncMap(directories(await readDirectory(i)), async platform =>
+			await utils.async.map(diskRoots, async i => 
+				utils.async.map(directories(await readDirectory(i)), async platform =>
 					GatherSDKListFromDirectory(platform, path.join(i, platform), sdks)
 				)
 			);
 
-			await utils.asyncMap(registryRoots(), async i => 
-				utils.asyncMap(await i.subkey(registryRoot), async platform =>
+			await utils.async.map(registryRoots(), async i => 
+				utils.async.map(await i.subkey(registryRoot), async platform =>
 					GatherSDKListFromRegistry(platform.name, await platform, sdks)
 				)
 			);
@@ -540,7 +540,7 @@ export async function GetFoldersInVSInstalls(minVersion?: Version, maxVersion?: 
 }
 
 export async function GetWindowsKitVersions() {
-	const versions = await utils.asyncReduce(registryRoots(),
+	const versions = await utils.async.reduce(registryRoots(),
 		async (acc, i) => ({...acc, ...GatherVersionStrings(undefined, Object.keys(await i.subkey("SOFTWARE\\MICROSOFT\\Windows Kits\\Installed Roots")))}),
 		{}
 	);

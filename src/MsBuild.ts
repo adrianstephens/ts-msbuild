@@ -5,7 +5,7 @@ import * as expression from './expression';
 import * as utils from '@isopodlabs/utilities';
 import * as insensitive from '@isopodlabs/utilities/insensitive';
 
-import { ProjectContainer, Project, ProjectConfiguration, ProjectItemEntry, Properties, FolderTree, Folder, addKnownProjects } from './Project';
+import { ProjectContainer, Project, ProjectConfiguration, ProjectItemEntry, Properties, FolderTree, Folder, FileEntry } from './Project';
 import { XMLCache, xml_load, xml_save, Glob, exists, toOSPath, search } from './index';
 import * as Locations from './Locations';
 
@@ -13,7 +13,12 @@ import * as Locations from './Locations';
 //	types
 //-----------------------------------------------------------------------------
 
-export type Settings	= Record<string, any>;
+interface Evaluated {
+	[key: string]: string | Evaluated;
+}
+type EvaluatedValue = string | Evaluated;
+
+export type Settings	= Record<string, EvaluatedValue | Promise<EvaluatedValue>>;
 export type Origins		= Record<string, xml.Element>;
 
 interface Imports {
@@ -26,33 +31,33 @@ interface Imports {
 //-----------------------------------------------------------------------------
 
 export class PropertyContext {
-	public globals	= new Set<string>;
-	public properties: Record<string, string>;
+	globals	= new Set<string>;
+	properties: Record<string, string>;
 	
 	constructor(properties: Record<string, string> = {}) {
 		this.properties = insensitive.Record(properties);
 	}
 
-	public substitute(value: string, leave_undefined = false): Promise<string> {
+	substitute(value: string, leave_undefined = false): Promise<string> {
 		return utils.async_replace_back(value,/\$\((registry:[\\@\w]+|\w+|\[[\w.]+\])(\)|\.\w+\(|::\w+\()/g, async (m: RegExpExecArray, right:string) =>
 			expression.substitutor(m, right, this.properties, leave_undefined)
 		);
 	}
 
-	public async substitute_path(value: string): Promise<string> {
+	async substitute_path(value: string): Promise<string> {
 		return toOSPath(await this.substitute(value, true));
 	}
 
-	public async get_fullpath(origpath: string): Promise<string> {
+	async get_fullpath(origpath: string): Promise<string> {
 		const subspath = await this.substitute_path(origpath);
 		return subspath.indexOf('$') === -1 ? path.resolve(this.properties.MSBUILDTHISFILEDIRECTORY, subspath) : '';
 	}
 
-	public async checkConditional(condition?: string) : Promise<boolean> {
+	async checkConditional(condition?: string) : Promise<boolean> {
 		return !condition || await this.substitute(condition).then(condition => expression.Evaluate(condition));
 	}
 
-	public setPath(fullPath: string) {
+	setPath(fullPath: string) {
 		const parsed 	= path.parse(fullPath);
 		this.properties.MSBUILDTHISFILEFULLPATH		= fullPath;
 		this.properties.MSBUILDTHISFILEDIRECTORY	= parsed.dir + path.sep;
@@ -61,34 +66,34 @@ export class PropertyContext {
 		this.properties.MSBUILDTHISFILE				= parsed.base;
 	}
 
-	public currentPath() {
+	currentPath() {
 		return this.properties.MSBUILDTHISFILEFULLPATH;
 	}
 
-	public makeLocal(locals: string[]) {
+	makeLocal(locals: string[]) {
 		locals.forEach(i => this.globals.delete(i.toUpperCase()));
 	}
 
-	public makeGlobal(globals: string[]) {
+	makeGlobal(globals: string[]) {
 		globals.forEach(i => this.globals.add(i.toUpperCase()));
 	}
-	public isGlobal(name: string) {
+	isGlobal(name: string) {
 		return this.globals.has(name.toUpperCase());
 	}
 
-	public async set(name: string, value: string, substitute: boolean): Promise<boolean> {
+	async set(name: string, value: string, substitute: boolean): Promise<boolean> {
 		if (this.isGlobal(name))
 			return false;
 		this.properties[name] = await this.substitute(value, !substitute);
 		return true;
 	}
 
-	public async add(props: Record<string, string>) {
+	async add(props: Record<string, string>) {
 		for (const i in props)
 			await this.set(i, props[i], true);
 	}
 
-	public addDirect(props: Record<string, string>) {
+	addDirect(props: Record<string, string>) {
 		for (const i in props)
 			this.properties[i] = props[i];
 	}
@@ -226,29 +231,24 @@ function fixRelativePath(relativePath: string, link?: string): string {
 	return relativePath;
 }
 
+
 async function evaluate_data(items: xml.Element[], settings: Settings, properties: PropertyContext, modified: Origins) {
 
-	async function evaluate(item: xml.Element) {
-		if (item.firstElement()) {
-			const result : Record<string, any> = {};
-			for (const i of item.children) {
-				if (xml.isElement(i))
-					result[item.name] = await evaluate(i);
-			}
-			return result;
+	async function evaluate(item: xml.Element): Promise<EvaluatedValue> {
+		if (item.firstElement())
+			return Object.fromEntries(await utils.async.map(item.allElements(), async i => [i.name, await evaluate(i)] as [string, EvaluatedValue]));
 	
-		} else {
-			const text = item.allText().join();
-			return properties.substitute(text)
-				.then(subs => utils.async_replace_back(subs, /%\((\w+)(\))/g, async (m: RegExpExecArray, right:string) => {
-					const replace = await settings[m[1]];
-					if (!replace) {
-						console.log(`no % substitute for ${m[1]}`);
-						return m[0] + right;
-					}
-					return replace + right;
-				}));
-		}
+		const text = item.allText().join();
+		return properties.substitute(text)
+			.then(subs => utils.async_replace_back(subs, /%\((\w+)(\))/g, async (m: RegExpExecArray, right:string) => {
+				const replace = await settings[m[1]];
+				if (!replace) {
+					if (m[1] !== item.name)	// ignore %X = %X;...
+						console.log(`no % substitute for ${m[1]} while evaluating ${item.name}`);
+					return m[0] + right;
+				}
+				return replace + right;
+			}));
 	}
 
 	for (const i of items) {
@@ -261,17 +261,22 @@ async function evaluate_data(items: xml.Element[], settings: Settings, propertie
 
 class XMLProjectItemEntry implements ProjectItemEntry {
 	private elements: xml.Element[];
-	public data = new Proxy(this, {
+	data = new Proxy(this, {
 		get(target, prop: string) {
 			if (prop in target.other)
 				return target.other[prop];
 			return target.elements.find(e => e.name === prop)?.firstText() || '';
 		},
+		set(target, prop: string, value: any) {
+			target.other[prop] = value;
+			return true;
+		},
 		ownKeys(target) {
 			return target.elements.map(e => e.name);
 		},
-		getOwnPropertyDescriptor() {
-			return {configurable: true, enumerable: true};
+		getOwnPropertyDescriptor(target, prop: string) {
+			//if (prop in target.other || target.elements.find(e => e.name === prop))
+			return {configurable: true, enumerable: true, writable: true};
 		}
 	
 	}) as Record<string, any>;
@@ -286,7 +291,7 @@ class XMLProjectItemEntry implements ProjectItemEntry {
 		for (const i of elements) {
 			const alike = this.elements.filter(e => e.name === i.name && e.attributes.Condition === i.attributes.Condition);
 			for (const j of alike)
-				utils.arrayRemove(this.elements, j);
+				utils.array.remove(this.elements, j);
 		}
 		this.elements = [...this.elements, ...elements];
 		this.other = {...this.other, ...other};
@@ -300,7 +305,7 @@ class XMLProjectItemEntry implements ProjectItemEntry {
 		} else {
 			const loc = this.elements[index];
 			if (!element) {
-				utils.arrayRemove(this.elements, loc);
+				utils.array.remove(this.elements, loc);
 			} else {
 				this.elements[index] = element;
 			}
@@ -318,19 +323,6 @@ interface Definition {
 	data: 		xml.Element[];
 	isProject: 	boolean;
 };
-/*
-class DeferredStat {
-	stat?: Promise<fs.Stats | undefined>;
-	constructor(public path: string) {}
-	then(f: (s: fs.Stats | undefined) => any) {
-		return new Promise(resolve => {
-			if (!this.stat)
-				this.stat = fs.promises.stat(this.path);
-			return resolve(this.stat.then(f));
-		});
-	}
-}
-*/
 
 export interface SettingsWithOrigins {
 	settings: Record<string, any>;
@@ -338,17 +330,17 @@ export interface SettingsWithOrigins {
 }
 
 export class Items {
-	public	definitions:	Definition[] = [];
-	public	groups:			xml.Element[] = [];
-	public 	entries:		XMLProjectItemEntry[] = [];
+	definitions:	Definition[] = [];
+	roups:			xml.Element[] = [];
+	entries:		XMLProjectItemEntry[] = [];
 
 	constructor(public name: string, public mode: ItemMode) {}
 
-	public addDefinition(condition:string, data: xml.Element, isProject:boolean) {
+	addDefinition(condition:string, data: xml.Element, isProject:boolean) {
 		this.definitions.push({condition: condition, source: data, data: data.allElements(), isProject: isProject});
 	}
 
-	public getDefinition(condition: string, isProject:boolean) : Definition {
+	getDefinition(condition: string, isProject:boolean) : Definition {
 		for (const d of this.definitions) {
 			if (d.condition === condition && d.isProject == isProject)
 				return d;
@@ -358,14 +350,13 @@ export class Items {
 		return d;
 	}
 
-	public async evaluate(properties: PropertyContext, entry?: XMLProjectItemEntry) : Promise<SettingsWithOrigins> {
+	async evaluate(properties: PropertyContext, entry?: XMLProjectItemEntry) : Promise<SettingsWithOrigins> {
 		const modified:	Origins		= {};
 		let settings:	Settings	= {};
 
 		if (entry) {
 			const fullPath 	= entry.data.fullPath;
 			const parsed 	= path.parse(fullPath);
-			//const stat 		= new DeferredStat(fullPath);
 			const stat 		= new utils.Lazy<Promise<fs.Stats | undefined>>(async () => fs.promises.stat(fullPath));
 
 			settings = {
@@ -377,9 +368,9 @@ export class Items {
 				Directory:					parsed.dir,
 				RecursiveDir:				path.dirname(entry.data.relativePath),
 				Identity:					"Identity",
-				get ModifiedTime()			{ return stat.then(s => s?.mtime); },
-				get CreatedTime()			{ return stat.then(s => s?.ctime); },
-				get AccessedTime()			{ return stat.then(s => s?.mtime); },
+				get ModifiedTime()			{ return stat.then(s => s?.mtime.toISOString() ?? ''); },
+				get CreatedTime()			{ return stat.then(s => s?.ctime.toISOString() ?? ''); },
+				get AccessedTime()			{ return stat.then(s => s?.atime.toISOString() ?? ''); },
 				DefiningProjectFullPath:	"DefiningProjectFullPath",
 				DefiningProjectDirectory:	"DefiningProjectDirectory",
 				DefiningProjectName:		"DefiningProjectName",
@@ -396,7 +387,7 @@ export class Items {
 		return {settings, origins: modified};
 	}
 
-	public includePlain(name: string, source?: xml.Element, other: Record<string, any> = {}) {
+	includePlain(name: string, source?: xml.Element, other: Record<string, any> = {}) {
 		const item = this.entries.find(e => e.name === name);
 		if (item) {
 			item.add(source?.allElements() ?? [], other);
@@ -405,7 +396,7 @@ export class Items {
 		}
 	}
 
-	public includeFile(basePath: string, fullPath: string, source: xml.Element, link?:string) {
+	includeFile(basePath: string, fullPath: string, source: xml.Element, link?:string) {
 		const item = this.entries.find(e => e.data.fullPath === fullPath);
 		if (item) {
 			if (source)
@@ -422,7 +413,7 @@ export class Items {
 		}
 	}
 
-	public async includeFiles(basePath: string, value: string, exclude: string | undefined, data: xml.Element, link?:string) {
+	async includeFiles(basePath: string, value: string, exclude: string | undefined, data: xml.Element, link?:string) {
 		const excludes	= exclude?.split(";");
 		for (let pattern of value.split(';')) {
 			if ((pattern = pattern.trim())) {
@@ -432,12 +423,12 @@ export class Items {
 		}
 	}
 
-	public removeFiles(basePath: string, value: string) {
+	removeFiles(basePath: string, value: string) {
 		const exclude = new Glob(value.split(";").map(s => path.join(basePath, s)));
 		this.entries = this.entries.filter(e => !exclude.test(e.data.fullPath));
 	}
 
-	public updateFiles(basePath: string, value: string, data: xml.Element, link?:string) {
+	updateFiles(basePath: string, value: string, data: xml.Element, link?:string) {
 		const update	= new Glob(value.split(";").map(s => path.join(basePath, s)));
 		for (const entry of this.entries) {
 			if (update.test(entry.data.fullPath)) {
@@ -448,13 +439,13 @@ export class Items {
 		}
 	}
 
-	public getEntry(filepath : string) {
+	getEntry(filepath : string) {
 		for (const entry of this.entries)
 			if (entry.data.fullPath === filepath)
 				return entry;
 	}
 
-	public addSetting(name: string, value: string, condition: string | undefined, entry: XMLProjectItemEntry|undefined) : xml.Element | undefined {
+	addSetting(name: string, value: string, condition: string | undefined, entry: XMLProjectItemEntry|undefined) : xml.Element | undefined {
 
 		if (entry) {
 			return entry.modify(name, value, condition);
@@ -469,7 +460,7 @@ export class Items {
 			}
 		}
 		if (value === '<inherit>') {
-			utils.arrayRemove(d.data, loc);
+			utils.array.remove(d.data, loc);
 			return;
 			
 		} else if (loc) {
@@ -645,7 +636,7 @@ function addPropertySetting(file: xml.Element|undefined, name: string, value: st
 			}
 		}
 		if (value === '<inherit>') {
-			utils.arrayRemove(d.children, loc);
+			utils.array.remove(d.children, loc);
 			return;
 
 		} else if (loc) {
@@ -723,13 +714,13 @@ interface PropertiesWithOrigins extends PropertyContext {
 }
 
 export abstract class MsBuildBase extends Project {
-	public	raw_xml?:	xml.Element;
-	public	items: 		Record<string, Items> 	= {};
-	public	imports:	Imports					= {all:[]};	//currently parsed imports
-	public 	ext_assoc	= new utils.Lazy(async () => getExtAssoc(this.items.PropertyPageSchema));
+	raw_xml?:	xml.Element;
+	items: 		Record<string, Items> 	= {};
+	imports:	Imports					= {all:[]};	//currently parsed imports
+	ext_assoc	= new utils.Lazy(async () => getExtAssoc(this.items.PropertyPageSchema));
 
-	public	user_xml?:	xml.Element;
-	public	settings_ready	= Promise.resolve();
+	user_xml?:	xml.Element;
+	settings_ready	= Promise.resolve();
 	private project_dirty	= 0;
 	private user_dirty		= 0;
 
@@ -748,7 +739,7 @@ export abstract class MsBuildBase extends Project {
 			loc = loc.parent;
 		return loc === this.raw_xml;
 	}
-	public isLocal(loc: xml.Element) : boolean {
+	isLocal(loc: xml.Element) : boolean {
 		while (loc.parent)
 			loc = loc.parent;
 		return loc === this.raw_xml || loc === this.user_xml;
@@ -849,17 +840,17 @@ export abstract class MsBuildBase extends Project {
 		return g;
 	}
 
-	public validConfig(config: ProjectConfiguration) {
+	validConfig(config: ProjectConfiguration) {
 		return !('ProjectConfiguration' in this.items)
 			|| !!this.items.ProjectConfiguration.entries.find(i => i.data.Configuration === config.Configuration && i.data.Platform === config.Platform);
 	}
 
-	public configurationList() : string[] {
+	configurationList() : string[] {
 		return 'ProjectConfiguration' in this.items
 			? [...new Set(this.items.ProjectConfiguration.entries.map(i => i.data.Configuration))]
 			: super.configurationList();
 	}
-	public platformList() : string[] {
+	platformList() : string[] {
 		return 'ProjectConfiguration' in this.items
 			? [...new Set(this.items.ProjectConfiguration.entries.map(i => i.data.Platform))]
 			: super.platformList();
@@ -885,7 +876,7 @@ export abstract class MsBuildBase extends Project {
 		}
 	}
 
-	public addSetting(source: string, name: string, value: string, condition: string | undefined, item: string|undefined, persist: string, revert: boolean) : xml.Element | undefined {
+	addSetting(source: string, name: string, value: string, condition: string | undefined, item: string|undefined, persist: string, revert: boolean) : xml.Element | undefined {
 		let file: xml.Element | undefined;
 		if (persist === 'UserFile') {
 			this.user_dirty += revert ? -1 : 1;
@@ -903,7 +894,7 @@ export abstract class MsBuildBase extends Project {
 		}
 	}
 
-	public async getSettings(globals : Properties) {
+	async getSettings(globals : Properties) {
 		const props = await this.makeProjectProps(globals);
 		const imports : Imports 	= {all:[]};
 
@@ -918,7 +909,7 @@ export abstract class MsBuildBase extends Project {
 		return props.properties;
 	}
 
-	public async evaluateProps(globals: Properties): Promise<PropertiesWithOrigins> {
+	async evaluateProps(globals: Properties): Promise<PropertiesWithOrigins> {
 		const props = await this.makeProjectProps(globals);
 		const modified: Origins	= {};
 		await evaluatePropsAndImports(
@@ -947,19 +938,10 @@ export abstract class MsBuildBase extends Project {
 	}
 
 	async save() {
-		const promises = [] as Promise<any>[];
-
-		if (this.project_dirty) {
-			promises.push(this.rawSave(this.fullpath));
-			this.project_dirty = 0;
-		}
-
-		if (this.user_dirty) {
-			promises.push(xml_save(this.fullpath + ".user", this.user_xml!));
-			this.user_dirty = 0;
-		}
-
-		await Promise.all(promises);
+		await Promise.all([
+			this.project_dirty && ((this.project_dirty = 0), this.rawSave(this.fullpath)),
+			this.user_dirty && ((this.user_dirty = 0), xml_save(this.fullpath + ".user", this.user_xml!))
+		]);
 	}
 
 	solutionRead(_m: string[], _basePath: string) : ((line: string) => void) | undefined {
@@ -971,17 +953,7 @@ export abstract class MsBuildBase extends Project {
 	addFile(_name: string, _filepath: string): boolean {
 		return false;
 	}
-	removeFile(_file: string): boolean {
-		return false;
-	}
-	removeFolder(folder: Folder): boolean {
-		let found = false;
-		for (const entry of folder.entries) {
-			if (this.removeEntry(entry))
-				found = true;
-		}
-		return found;
-	}
+
 	removeEntry(entry: ProjectItemEntry): boolean {
 		for (const i in this.items) {
 			const item = this.items[i];
@@ -993,15 +965,14 @@ export abstract class MsBuildBase extends Project {
 		}
 		return false;
 	}
-	public getFolders(view: string) : Promise<FolderTree> {
+	getFolders(view: string) : Promise<FolderTree> {
 		return this.ready.then(() => {
 			const	foldertree = new FolderTree;
 			if (view == 'items') {
 				for (const i in this.items) {
 					if (this.items[i].entries.find(i => i.data.fullPath)) {
-						const folder = new Folder(i);
+						const folder = foldertree.root.addFolder(i);
 						folder.entries = this.items[i].entries;
-						foldertree.root.addFolder(folder);
 					}
 				}
 			} else {
@@ -1107,7 +1078,7 @@ function CPSProjectMaker(language: string, ext: string) {
 			}
 		}
 
-		public async evaluateProps(globals: Properties) : Promise<PropertiesWithOrigins> {
+		async evaluateProps(globals: Properties) : Promise<PropertiesWithOrigins> {
 			const props 	= await this.makeProjectProps(globals);
 			const modified: Origins	= {};
 			const sdkpath	= await Locations.getSdkPath() ?? '';
@@ -1136,12 +1107,21 @@ export class AndroidProject extends MsBuildBase {
 	}
 }
 
+async function readDirectory(dirname: string): Promise<Folder> {
+	return fs.promises.readdir(dirname, { withFileTypes: true }).catch(() => [] as fs.Dirent[]).then(async files => {
+		const folder = new Folder(path.basename(dirname));
+		folder.folders = await Promise.all(files.filter(i => i.isDirectory()).map(async i => readDirectory(path.join(dirname, i.name))));
+		folder.entries = files.filter(i => i.isFile()).map(i => FileEntry(path.join(dirname, i.name)));
+		return folder;
+	});
+}
+
 export class ESProject extends MsBuildBase {
 	folders: Promise<FolderTree>;
 
 	constructor(container: ProjectContainer, type:string, name:string, fullpath: string, guid: string) {
 		super(container, type, name, fullpath, guid);
-		this.folders = Folder.read(path.dirname(this.fullpath), '').then(root => new FolderTree(root));
+		this.folders = readDirectory(path.dirname(this.fullpath)).then(f => new FolderTree(f));
 	}
 }
 
@@ -1149,11 +1129,44 @@ export class ESProject extends MsBuildBase {
 //	Filters
 //-----------------------------------------------------------------------------
 
-async function loadFilterTree(fullPath : string, allfiles: Record<string, ProjectItemEntry>): Promise<FolderTree|undefined> {
+class FilterTree extends FolderTree {
+	dirty = false;
+}
+
+async function loadFilterTree(fullPath : string, allfiles: Record<string, ProjectItemEntry>, removeEntry: (entry: ProjectItemEntry) => boolean): Promise<FilterTree> {
+	class Filter extends Folder {
+		get name() { return this._name; }
+		set name(name : string) {
+			filtertree.dirty = true;
+			super._name = name;
+		}
+		add(item : ProjectItemEntry) {
+			filtertree.dirty = true;
+			super.add(item);
+		}
+		addFolder(name : string) {
+			filtertree.dirty = true;
+			const folder = new Filter(name);
+			this.folders.push(folder);
+			return folder;
+		}
+		remove(item : ProjectItemEntry) {
+			filtertree.dirty = true;
+			removeEntry(item);
+			super.remove(item);
+		}
+		removeFolder(item : Folder) {
+			filtertree.dirty = true;
+			for (const entry of item.entries)
+				removeEntry(entry);
+			super.removeFolder(item);
+		}
+	}
+
 	const basePath		= path.dirname(fullPath);
 	const content		= await fs.promises.readFile(fullPath, "utf-8").catch(() => '');
 	const document		= xml.parse(content);
-	const filtertree	= new FolderTree;
+	const filtertree	= new FilterTree(new Filter(''));
 	const project		= document?.firstElement();
 	const extensions: Record<string, Folder> = {};
 
@@ -1189,6 +1202,7 @@ async function loadFilterTree(fullPath : string, allfiles: Record<string, Projec
 		f.add(allfiles[i]);
 	}
 
+	filtertree.dirty = false;
 	return filtertree;
 }
 
@@ -1236,15 +1250,14 @@ async function saveFilterTree(tree: FolderTree, filename: string) {
 //-----------------------------------------------------------------------------
 
 export class VCProject extends MsBuildProject {
-	private filtertree: Promise<FolderTree | undefined>;
-	private filter_dirty	= 0;
+	private filtertree: Promise<FilterTree>;
 
 	constructor(container: ProjectContainer, type:string, name:string, fullpath: string, guid: string) {
 		super(container, type, name, fullpath, guid);
 		this.filtertree		= this.loadFilters(this.fullpath + ".filters");
 	}
 
-	private async loadFilters(fullPath : string): Promise<FolderTree|undefined> {
+	private async loadFilters(fullPath : string): Promise<FilterTree> {
 		return this.ready.then(() => {
 			const allfiles : Record<string, ProjectItemEntry> = {};
 			for (const i of Object.values(this.items)) {
@@ -1254,20 +1267,11 @@ export class VCProject extends MsBuildProject {
 							allfiles[entry.data.fullPath] = entry;
 				}
 			}
-			return loadFilterTree(fullPath, allfiles);
+			return loadFilterTree(fullPath, allfiles, this.removeEntry.bind(this));
 		});
 	}
 
-	public dirtyFilters() {
-		++this.filter_dirty;
-	}
-
-	public renameFolder(folder: Folder, newname: string) : boolean {
-		folder.name = newname;
-		this.dirtyFilters();
-		return true;
-	}
-	public addFile(name: string, filepath: string): boolean {
+	addFile(name: string, filepath: string): boolean {
 		this.ext_assoc.value.then(ext_assoc => {
 			const ext = path.extname(name);
 			const ContentType = ext_assoc[ext];
@@ -1285,16 +1289,16 @@ export class VCProject extends MsBuildProject {
 		return false;
 	}
 
-	public async save() {
-		const promises = [super.save()];
-		if (this.filter_dirty) {
-			const tree = await this.filtertree;
-			if (tree)
-				promises.push(saveFilterTree(tree, this.fullpath + ".filters"));
-			this.filter_dirty = 0;
-		}
+	async save() {
+		const tree = await this.filtertree;
+		await Promise.all([
+			super.save(),
+			tree.dirty && ((tree.dirty = false), saveFilterTree(tree, this.fullpath + ".filters"))
+		]);
+	}
 
-		await Promise.all(promises);
+	async getFolders(view:string) : Promise<FolderTree> {
+		return (view === 'filter' && await this.filtertree) || super.getFolders(view);
 	}
 }
 
@@ -1302,7 +1306,7 @@ export class VCProject extends MsBuildProject {
 //	register known guids
 //-----------------------------------------------------------------------------
 
-addKnownProjects({
+Project.addKnown({
 /*CPS*/ 											"{13B669BE-BB05-4DDF-9536-439F39A36129}": {make: CPSProjectMaker('?', '*'),			ext:"msbuildproj"},
 /*ASP.NET 5*/									  	"{8BB2217D-0F2D-49D1-97BC-3654ED321F3B}": {make: MsBuildProject, ext:"xproj"},
 /*ASP.NET Core Empty*/							 	"{356CAE8B-CFD3-4221-B0A8-081A261C0C10}": {make: MsBuildProject},

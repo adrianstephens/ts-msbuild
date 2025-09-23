@@ -4,15 +4,14 @@ import * as crypto from 'crypto';
 import * as binary from '@isopodlabs/binary';
 import * as CompDoc from '@isopodlabs/binary_libs/CompoundDocument';
 import * as utils from '@isopodlabs/utilities';
-import { ProjectContainer, Project, ProjectItemEntry, createProject, Folder, FolderTree, getProjectTypeFromExt, addKnownProjects } from './Project';
+import { ProjectContainer, Project, ProjectItemEntry, Folder, FolderTree } from './Project';
 
 class NonMSBuildProject extends Project {
 	async load() {}
 	async save() {}
 	addFile(_name: string, _filepath: string): boolean { return false; }
-	removeFile(_file: string): boolean { return false; }
 
-	public solutionRead(m: string[], _basePath: string) {
+	solutionRead(m: string[], _basePath: string) {
 		if (m[1] === "ProjectSection(ProjectDependencies)") {
 			return (s: string) => {
 				const m = assign_re.exec(s);
@@ -23,30 +22,26 @@ class NonMSBuildProject extends Project {
 	}
 
 
-	public solutionWrite(_basePath: string) : string {
+	solutionWrite(_basePath: string) : string {
 		return write_section('ProjectSection', 'ProjectDependencies', 'preProject', Object.fromEntries(this.dependencies.map(i => [i.name, i.name])));
 	}
 
-	public removeFolder(_folder: Folder): boolean {
-		return false;
-	}
-	public removeEntry(_entry: ProjectItemEntry): boolean {
-		return false;
-	}
-	public getFolders(_view: string) : Promise<FolderTree> {
+	getFolders(_view: string) : Promise<FolderTree> {
 		return Promise.resolve(new FolderTree);
 	}
 
 }
-
 export class SolutionFolder extends NonMSBuildProject {
-	public solutionItems: ProjectItemEntry[] = [];
+   	get name()			{ return this._name; }
+	set name(v: string)	{ this._name = v; this.container.dirty(); }
+
+	solutionItems: ProjectItemEntry[] = [];
 
 	constructor(public container: ProjectContainer, type:string, name:string, fullpath: string, guid: string) {
 		super(container, type, name, fullpath, guid);
 	}
 
-	public solutionRead(m: string[], basePath: string) {
+	solutionRead(m: string[], basePath: string) {
 		if (m[1] === "ProjectSection(SolutionItems)") {
 			return (s: string) => {
 				const m = assign_re.exec(s);
@@ -63,14 +58,14 @@ export class SolutionFolder extends NonMSBuildProject {
 			};
 		}
 	}
-	public solutionWrite(basePath: string) : string {
+	solutionWrite(basePath: string) : string {
 		return super.solutionWrite(basePath) + write_section('ProjectSection', 'SolutionItems', 'preProject', Object.fromEntries(this.solutionItems.map(i => {
 			const rel = path.relative(basePath, i.data.fullPath);
 			return [rel, rel];
 		})));
 	}
 
-	public addFile(name: string, filepath: string): boolean {
+	addFile(name: string, filepath: string): boolean {
 		this.solutionItems.push( {
 			name: name,
 			data: {
@@ -82,37 +77,30 @@ export class SolutionFolder extends NonMSBuildProject {
 		return true;
 	}
 	
-	public removeEntry(entry: ProjectItemEntry): boolean {
-		if (utils.arrayRemove(this.solutionItems, entry)) {
-			this.container.dirty();
-			return true;
+	getFolders(_view: string) : Promise<FolderTree> {
+		const container = this.container;
+		class Folder2 extends Folder {
+			constructor(public entries: ProjectItemEntry[]) {
+				super('');
+			}
+			remove(item : ProjectItemEntry) {
+				super.remove(item);
+				container.dirty();
+			}
 		}
-		return false;
-	}
-	
-	public removeFile(file: string): boolean {
-		const index = this.solutionItems.findIndex(i => i.data.fullPath == file);
-		if (index != -1) {
-			this.solutionItems.splice(index, 1);
-			this.container.dirty();
-			return true;
-		}
-		return false;
-	}
-	public getFolders(_view: string) : Promise<FolderTree> {
-		return Promise.resolve(new FolderTree(new Folder('', this.solutionItems)));
+		return Promise.resolve(new FolderTree(new Folder2(this.solutionItems)));
 	}
 
 }
 
 export class WebProject extends NonMSBuildProject {
-	public webProperties:	Record<string, string> = {};
+	webProperties:	Record<string, string> = {};
 
-	public solutionWrite(basePath: string) : string {
+	solutionWrite(basePath: string) : string {
 		return super.solutionWrite(basePath) + write_section('ProjectSection', 'WebsiteProperties', 'preProject', this.webProperties);
 	}
 
-	public solutionRead(m: string[]) {
+	solutionRead(m: string[]) {
 		if (m[1] === "ProjectSection(WebsiteProperties)") {
 			return (s: string) => {
 				const m = assign_re.exec(s);
@@ -121,19 +109,19 @@ export class WebProject extends NonMSBuildProject {
 			};
 		}
 	}
-	public getFolders(_view: string) {
+	getFolders(_view: string) {
 		return Promise.resolve(new FolderTree());
 	}
 
 }
 
 export class WebDeploymentProject extends NonMSBuildProject {
-	public getFolders(_view: string) {
+	getFolders(_view: string) {
 		return Promise.resolve(new FolderTree());
 	}
 }
 
-addKnownProjects({
+Project.addKnown({
 	/*CRM*/	                	"{88A30576-7583-4F75-8136-5EFD2C14ADFF}": {make: NonMSBuildProject},	
 	/*CRM plugin*/	         	"{4C25E9B5-9FA6-436C-8E19-B395D2A65FAF}": {make: NonMSBuildProject},	
 	/*IL project*/	         	"{95DFC527-4DC1-495E-97D7-E94EE1F7140D}": {make: NonMSBuildProject},	
@@ -177,22 +165,22 @@ const assign_re	= /\s*(.*?)\s*=\s*(.*)/;
 
 class LineParser {
 	private _currentLineIndex = -1;
-	public constructor(private lines: string[]) {}
+	constructor(private lines: string[]) {}
 
-	public currentLine(): string {
+	currentLine(): string {
 		return this.lines[this._currentLineIndex].trim();
 	}
-	public readLine(): string | null {
+	readLine(): string | null {
 		if (this._currentLineIndex + 1 >= this.lines.length)
 			return null;
 		return this.lines[++this._currentLineIndex].trim();
 	}
-	public parseSection(end : string, func : (str: string) => void): void {
+	parseSection(end : string, func : (str: string) => void): void {
 		let str: string | null;
 		while ((str = this.readLine()) !== null && str !== end)
 			func(str);
 	}
-	public parseSection_re(end: string, re: RegExp, func: (m: RegExpExecArray) => void): void {
+	parseSection_re(end: string, re: RegExp, func: (m: RegExpExecArray) => void): void {
 		let str: string | null;
 		while ((str = this.readLine()) !== null && str !== end) {
 			const m = re.exec(str);
@@ -281,10 +269,10 @@ function suo_path(filename: string) {
 //-----------------------------------------------------------------------------
 
 export class Solution implements ProjectContainer {
-	public projects:		Record<string, Project> = {};
-	public parents:			Record<string, Project> = {};
-	public debug_include:	string[]	= [];
-	public debug_exclude:	string[]	= [];
+	projects:		Record<string, Project> = {};
+	parents:			Record<string, Project> = {};
+	debug_include:	string[]	= [];
+	debug_exclude:	string[]	= [];
 
 	private config_list: 	string[]	= [];
 	private platform_list: 	string[]	= [];
@@ -298,10 +286,10 @@ export class Solution implements ProjectContainer {
 	private _dirty			= false;
 	private _dirty_suo		= false;
 
-	public get startup() : Project | undefined {
+	get startup() : Project | undefined {
 		return this.projects[this.config.StartupProject];
 	}
-	public set startup(project: Project | string) {
+	set startup(project: Project | string) {
 		if (typeof project !== 'string')
 			project = project.guid;
 		if (this.config.StartupProject !== project) {
@@ -310,13 +298,13 @@ export class Solution implements ProjectContainer {
 		}
 	}
 
-	public get activeConfiguration() {
+	get activeConfiguration() {
 		return {
 			Configuration:	this.config_list[this.active[0]],
 			Platform: 		this.platform_list[this.active[1]]
 		};
 	}
-	public set activeConfiguration({Configuration, Platform}: {Configuration: string, Platform: string}) {
+	set activeConfiguration({Configuration, Platform}: {Configuration: string, Platform: string}) {
 		const c = this.config_list.indexOf(Configuration);
 		const p = this.platform_list.indexOf(Platform);
 
@@ -336,7 +324,7 @@ export class Solution implements ProjectContainer {
 		}
 	}
 
-	public projectActiveConfiguration(project: Project) {
+	projectActiveConfiguration(project: Project) {
 		const c = project.configuration[this.active.join('|')];
 		return {
 			Configuration:	c?.Configuration ?? this.config_list[this.active[0]],
@@ -344,11 +332,11 @@ export class Solution implements ProjectContainer {
 		};
 	}
 
-	public get childProjects() {
+	get childProjects() {
 		return Object.keys(this.projects).filter(p => !this.parents[p]).map(p => this.projects[p]);
 	}
 
-	public get basedir() {
+	get basedir() {
 		return path.dirname(this.fullpath);
 	}
 
@@ -356,10 +344,10 @@ export class Solution implements ProjectContainer {
 	}
 
 	dispose() {
-		utils.asyncMap(Object.keys(this.projects), async k => this.projects[k].save());
+		utils.async.map(Object.keys(this.projects), async k => this.projects[k].save());
 	}
 
-	public dirty() {
+	dirty() {
 		this._dirty = true;
 	}
 
@@ -461,16 +449,16 @@ export class Solution implements ProjectContainer {
 					const type = m[1];
 					if ((m = /"(.*)"\s*,\s*"(.*)"\s*,\s*"(.*)"/.exec(value))) {
 						const guid 	= m[3];
-						const proj 	= Project.getFromId(guid) ?? createProject(this, type, m[1], path.resolve(basePath, m[2]), guid);
+						const proj 	= Project.getFromId(guid) ?? Project.create(this, type, m[1], path.resolve(basePath, m[2]), guid);
 						this.projects[guid] = proj;
 
 						parser.parseSection_re("EndProject", assign_re, m => {
 							const f = proj.solutionRead(m, basePath)
-								?? m[1] === "ProjectSection(ProjectDependencies)" ? (s: string) => {
+								?? (m[1] === "ProjectSection(ProjectDependencies)" ? (s: string) => {
 									const m = assign_re.exec(s);
 									if (m)
 										proj.addDependency(this.projects[m[1]]);
-								} : (() => {});
+								} : (() => {}));
 							parser.parseSection("EndProjectSection", f);
 						});
 					}
@@ -583,7 +571,7 @@ export class Solution implements ProjectContainer {
 		return out;
 	}
 
-	public projectByName(name : string) {
+	projectByName(name : string) {
 		for (const key in this.projects) {
 			if (this.projects[key].name === name)
 				return this.projects[key];
@@ -604,20 +592,20 @@ export class Solution implements ProjectContainer {
 			}
 		});
 	}
-	public configurationList() : string[] {
+	configurationList() : string[] {
 		return this.makeProxy(this.config_list);
 	}
-	public platformList() : string[] {
+	platformList() : string[] {
 		return this.makeProxy(this.platform_list);
 	}
 
-	public async addProject(proj: Project) {
+	async addProject(proj: Project) {
 		if (!proj.guid)
 			proj.guid = crypto.randomUUID();
 
 		//make histograms of all mappings from solution config/plat to project config/plat
-		const chistogram: Histogram[] = utils.array_make(this.config_list.length, Histogram);
-		const phistogram: Histogram[] = utils.array_make(this.platform_list.length, Histogram);
+		const chistogram: Histogram[] = utils.array.make(this.config_list.length, Histogram);
+		const phistogram: Histogram[] = utils.array.make(this.platform_list.length, Histogram);
 
 		for (const c in this.config_list) {
 			chistogram[c] = new Histogram;
@@ -659,17 +647,17 @@ export class Solution implements ProjectContainer {
 		this.dirty();
 	}
 
-	public async addProjectFilename(filename: string) {
+	async addProjectFilename(filename: string) {
 		const parsed	= path.parse(filename);
-		const type		= getProjectTypeFromExt(parsed.ext);
+		const type		= Project.typeFromExt(parsed.ext);
 		if (type) {
-			const project = createProject(this, type, parsed.name, filename, '');
+			const project = Project.create(this, type, parsed.name, filename, '');
 			this.addProject(project);
 			return project;
 		}
 	}
 
-	public removeProject(project: Project) {
+	removeProject(project: Project) {
 		this.parents[project.guid]?.removeProject(project);
 		delete this.projects[project.guid];
 		this.dirty();

@@ -13,7 +13,6 @@
 	],
 	"scripts": {
 		"build": "tsc",
-		"test": "echo \"No tests specified\" && exit 0",
 		"patch": "ts-patch install"
 	},
 	"keywords": [
