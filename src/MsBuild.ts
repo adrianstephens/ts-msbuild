@@ -447,9 +447,8 @@ export class Items {
 
 	addSetting(name: string, value: string, condition: string | undefined, entry: XMLProjectItemEntry|undefined) : xml.Element | undefined {
 
-		if (entry) {
+		if (entry)
 			return entry.modify(name, value, condition);
-		}
 
 		let loc: xml.Element | undefined;
 		const d = this.getDefinition(condition || '', true);
@@ -481,9 +480,9 @@ function MakeItemsProxy(items: Record<string, Items>) {
 			if (!(name in target)) {
 				const lower = name.toLowerCase();
 				const found = Object.keys(target).find(e => e.toLowerCase() === lower);
-				if (found)
+				if (found) {
 					name = found;
-				else {
+				} else {
 					const mode = getItemMode(name);
 					target[name] = new Items(name, mode);
 				}

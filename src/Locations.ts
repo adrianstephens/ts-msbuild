@@ -17,10 +17,11 @@ function directories(files: fs.Dirent[]) {
 }
 
 export let vsdir	 = process.env.vsdir ?? '';
-if (!vsdir) GetFoldersInVSInstalls().then(vs => {
-	if (vs.length)
-		vsdir = vs.at(-1)!;
-});
+if (!vsdir)
+	GetFoldersInVSInstalls().then(vs => {
+		if (vs.length)
+			vsdir = vs.at(-1)!;
+	});
 
 export const dotNetSDKs = new utils.Lazy(async (): Promise<Array<{version: Version, path: string}>> => {
 	const sdks: Array<{version: Version, path: string}> = [];
