@@ -22,7 +22,7 @@
 				"command": "git add . & npm version ${input:version} --force",
 			},
 			"problemMatcher": [],
-			"dependsOn": ["npm: build", "makelinks"]
+			"dependsOn": ["npm: build"]
 		},
 		{
 			"type": "shell",
@@ -36,7 +36,7 @@
 			"label": "PACKAGE",
 			"command": "npm pack",
 			"problemMatcher": [],
-			"dependsOn": ["npm: build", "makelinks"]
+			"dependsOn": ["npm: build"]
 		},
 	],
 	"inputs": [

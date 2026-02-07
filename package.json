@@ -1,6 +1,6 @@
 {
 	"name": "@isopodlabs/msbuild",
-	"version": "0.1.2",
+	"version": "0.2.0",
 	"description": "A package for reading and running MSBuild files with TypeScript.",
 	"repository": {
 		"type": "git",
