@@ -101,6 +101,8 @@ Built-in support for MSBuild expressions and functions:
 - Property substitution: `$(PropertyName)`
 - Registry access: `$(registry:HKEY_LOCAL_MACHINE\SOFTWARE\...)`
 - Static function calls: `$([System.Environment]::GetFolderPath(...))`
+- Metadata access: `%(MetadataName)`
+- List expressions: `@(Items)` and `@(Items->%(field))`
 
 ## License
 
