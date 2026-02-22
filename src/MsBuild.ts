@@ -1,25 +1,30 @@
 import * as path from 'path';
 import * as fs from 'fs';
 import * as xml from '@isopodlabs/xml';
-import * as expression from './expression';
+import * as registry from '@isopodlabs/registry';
+import { StaticFunctions, NETString, get_params, ReExpand, Evaluate, EvaluateExpressionNormal, EvaluateExpressionPartial } from './expression';
 import * as utils from '@isopodlabs/utilities';
 import * as insensitive from '@isopodlabs/utilities/insensitive';
 
 import { ProjectContainer, Project, ProjectConfiguration, ProjectItemEntry, Properties, FolderTree, Folder, FileEntry } from './Project';
-import { XMLCache, xml_load, xml_save, Glob, exists, toOSPath, search } from './index';
+import { XMLCache, xml_load, xml_save, Glob, exists, toOSPath, search, stats, Solution } from './index';
 import * as Locations from './Locations';
 
 //-----------------------------------------------------------------------------
 //	types
 //-----------------------------------------------------------------------------
 
-interface Evaluated {
-	[key: string]: string | Evaluated;
-}
-type EvaluatedValue = string | Evaluated;
-
-export type Settings	= Record<string, EvaluatedValue | Promise<EvaluatedValue>>;
+export type Metadata	= Record<string, any>;
 export type Origins		= Record<string, xml.Element>;
+
+export interface MetadataWithOrigins {
+	metadata:	Metadata;
+	origins:	Origins;
+}
+
+interface PropertiesWithOrigins extends PropertyContext {
+	origins:	Origins;
+}
 
 interface Imports {
 	[key:string]: string[];
@@ -30,40 +35,169 @@ interface Imports {
 //	Properties
 //-----------------------------------------------------------------------------
 
+const reSubs = utils.regex('gi')`
+# list reference
+\@\(
+	(?<list>\w+)
+	(?<part2>
+		\)
+		|->
+	)
+
+# item metadata reference
+|\%\(
+	(?<meta>\w+)
+	(?:\.(?<part2>\w+))?
+\)
+
+# registry reference
+|\$\(
+	registry:(?<key>[^@)]+)
+	@(?<part2>.+?)
+\)
+
+# property or function call
+|\$\(
+	(?<part1>
+		|\w+					# simple word
+		|\[[\w.]+\]				# bracketed word/dots
+	)
+	(?<part2>
+		\)
+		|\.\w+
+		|::\w+
+	)
+`;
+
+
 export class PropertyContext {
-	globals	= new Set<string>;
-	properties: Record<string, string>;
+	globals	= new Set<string>();
+	properties:	Record<string, string>;
+	items:		Record<string, Items> = {};
+	cache	= new Map<string, Promise<boolean>>();
 	
 	constructor(properties: Record<string, string> = {}) {
 		this.properties = insensitive.Record(properties);
 	}
 
-	substitute(value: string, leave_undefined = false): Promise<string> {
-		return utils.async_replace_back(value,/\$\((registry:[\\@\w]+|\w+|\[[\w.]+\])(\)|\.\w+\(|::\w+\()/g, async (m: RegExpExecArray, right:string) =>
-			expression.substitutor(m, right, this.properties, leave_undefined)
-		);
+	substitute(value: string, metadata?: Metadata, leave_undefined = false): Promise<string> {
+		const re = utils.reDup(reSubs);
+		const recurse = async (metadata?: Metadata): Promise<string> => {
+			return utils.async_replace(value, re, async (m) => {
+				const {list, meta, key, part1, part2} = m.groups!;
+
+				if (list) {
+					//%(list) or %(list->) is a reference to the items in the list, with -> indicating that metadata should be evaluated for each item and joined with ';'
+
+					const item = this.items[list];
+					if (part2 === ')') {
+						//return item.entries.join(';');
+						return Promise.all(item.entries.map(async entry => {
+							const settings = (await item.evaluate(this, entry)).metadata;
+							return settings.Identity;
+
+						})).then(results => results.join(';'));
+					}
+
+					const [close, params] = get_params(value.slice(re.lastIndex));
+					re.lastIndex += close;
+
+					if (item.entries.length === 0)
+						return '';
+
+					const result = await utils.async.map(item.entries, async entry => {
+						const settings = (await item.evaluate(this, entry)).metadata;
+						const result = await this.substitute(params[0], settings);
+						return result;
+					});
+					
+					return result.join(';');
+
+				} else if (meta) {
+					//%(meta) or %(meta.field) is a reference to the metadata of the current item, with field being optional and indicating a specific metadata field
+
+					if (part2) {
+						const _item = this.items[meta];
+						return metadata?.[part2];
+
+					} else {
+						const value = metadata?.[meta];
+						return value ?? (leave_undefined ? m[0] : '');
+					}
+
+				} else if (key) {
+					//$(registry:key@value) is a reference to the registry, with key being the registry key and value being the name of the value to retrieve
+
+					const hkey	= await registry.getKey(key);
+					return hkey.values[part2] ?? (leave_undefined ? m[0] : '');
+				}
+
+				//$(property) or $(property.func) or $(property::func) is a reference to a property, with optional function calls. :: indicates a static function call, while . indicates an instance function call on the property value
+
+				let replace = part1.startsWith('[') ? part1.slice(1, -1) : this.properties[part1.toUpperCase()];
+				
+				if (!replace) {
+					if (leave_undefined)
+						return m[0];
+					replace = '';
+				}
+
+				if (part2 === ')')
+					return replace;
+
+				const right = await recurse(metadata);
+				const [close, params] = right[0] === '(' ? get_params(right, 1) : [0, []];
+				let result;
+
+				try {
+					if (part2.startsWith('::')) {
+						result = await StaticFunctions.run(replace, part2.slice(2), ...params);
+						if (result instanceof ReExpand)
+							result = await this.substitute(result.value, metadata);
+					} else {
+						result = new NETString(replace)[part2.slice(1)](params);
+					}
+
+					const t = await Evaluate(result, right, close);
+					return (t.result == undefined ? '' : t.result.toString()) + right.substring(t.end + 1);//+1 for substitution closing )
+
+				} catch (_error) {
+					return `error_evaluating_${result}`;
+				}
+
+			});
+		};
+		return recurse(metadata);
 	}
 
 	async substitute_path(value: string): Promise<string> {
-		return toOSPath(await this.substitute(value, true));
+		return toOSPath(await this.substitute(value, undefined, true));
 	}
 
-	async get_fullpath(origpath: string): Promise<string> {
-		const subspath = await this.substitute_path(origpath);
-		return subspath.indexOf('$') === -1 ? path.resolve(this.properties.MSBUILDTHISFILEDIRECTORY, subspath) : '';
-	}
+	async checkConditional(condition?: string, metadata?: Metadata) : Promise<boolean> {
+		if (!condition)
+			return true;
 
-	async checkConditional(condition?: string) : Promise<boolean> {
-		return !condition || await this.substitute(condition).then(condition => expression.Evaluate(condition));
+		const cached = this.cache.get(condition);
+		if (cached)
+			return cached;
+
+		stats.checkConditional++;
+		const subs	= await this.substitute(condition, metadata);
+		const res	= await EvaluateExpressionNormal(subs);
+		this.cache.set(condition, res.result);
+		return res.result;
 	}
 
 	setPath(fullPath: string) {
 		const parsed 	= path.parse(fullPath);
-		this.properties.MSBUILDTHISFILEFULLPATH		= fullPath;
-		this.properties.MSBUILDTHISFILEDIRECTORY	= parsed.dir + path.sep;
-		this.properties.MSBUILDTHISFILENAME			= parsed.name;
-		this.properties.MSBUILDTHISFILEEXTENSION	= parsed.ext;
-		this.properties.MSBUILDTHISFILE				= parsed.base;
+		this.addDirect({
+			MSBuildThisFileFullpath:	fullPath,
+			MSBuildThisFileDirectory:	parsed.dir + path.sep,
+			MSBuildThisFile:			parsed.base,
+			MSBuildThisFileName:		parsed.name,
+			MSBuildThisFileExtension:	parsed.ext,
+		});
 	}
 
 	currentPath() {
@@ -84,7 +218,8 @@ export class PropertyContext {
 	async set(name: string, value: string, substitute: boolean): Promise<boolean> {
 		if (this.isGlobal(name))
 			return false;
-		this.properties[name] = await this.substitute(value, !substitute);
+		this.properties[name] = await this.substitute(value, undefined, !substitute);
+		this.cache.clear();
 		return true;
 	}
 
@@ -96,12 +231,15 @@ export class PropertyContext {
 	addDirect(props: Record<string, string>) {
 		for (const i in props)
 			this.properties[i] = props[i];
+		this.cache.clear();
 	}
 }
 
 async function evaluateImport(import_path: string, properties: PropertyContext, label = '', imports?: Imports, modified?: Origins) {
-	const resolved	= await properties.get_fullpath(import_path);
-	const files		= await search(resolved);
+	const currentPath	= properties.currentPath();
+	const currentDir	= currentPath ? path.dirname(currentPath) : process.cwd();
+	const resolved		= await properties.substitute_path(import_path);
+	const files			= await utils.async.map(resolved.split(';').filter(Boolean), r => search(path.resolve(currentDir, r))).then(results => results.flat());
 	for (const i of files) {
 		if (imports && imports.all.indexOf(i) !== -1) {
 			console.log(`Double import: ${i}`);
@@ -110,12 +248,8 @@ async function evaluateImport(import_path: string, properties: PropertyContext, 
 
 		const root = (await XMLCache.get(i))?.firstElement();
 		if (root?.name == 'Project') {
-			const prev = properties.currentPath();
 			properties.setPath(i);
-			//log(`vscode://file/${i.replaceAll(' ','%20')}`);
 			await evaluatePropsAndImports(root.allElements(), properties, imports, modified);
-			if (prev)
-				properties.setPath(prev);
 
 			if (imports) {
 				if (!(label in imports))
@@ -127,12 +261,13 @@ async function evaluateImport(import_path: string, properties: PropertyContext, 
 			console.log(`Invalid import: ${i} from ${import_path}`);
 		}
 	}
+	if (currentPath)
+		properties.setPath(currentPath);
 }
 
 async function evaluatePropsAndImports(raw_xml: xml.Element[], properties: PropertyContext, imports?: Imports, modified?: Origins) : Promise<void> {
 	for (const element of raw_xml) {
 		if (await properties.checkConditional(element.attributes.Condition)) {
-
 			if (element.name === 'PropertyGroup') {
 				for (const e of element.allElements()) {
 					if (await properties.checkConditional(e.attributes.Condition)
@@ -143,13 +278,30 @@ async function evaluatePropsAndImports(raw_xml: xml.Element[], properties: Prope
 				}
 
 			} else if (element.name === "Import") {
-				await evaluateImport(element.attributes.Project, properties, '', imports, modified);
+				if (element.attributes.Sdk) {
+					const sdkPath = await Locations.getSdkPath(element.attributes.Sdk, properties.properties.MSBuildSDKsPath);
+					//silently ignore missing SDK imports as they are often optional and handled by targets files
+					if (sdkPath)
+						await evaluateImport(path.join(sdkPath, element.attributes.Project), properties, '', imports, modified);
+				} else {
+					await evaluateImport(element.attributes.Project, properties, '', imports, modified);
+				}
 
 			} else if (element.name === "ImportGroup") {
 				const label = element.attributes.Label??'';
 				for (const item of element.children) {
 					if (xml.isElement(item) && item.name == "Import" && await properties.checkConditional(item.attributes.Condition))
 						await evaluateImport(item.attributes.Project, properties, label, imports, modified);
+				}
+			} else if (element.name === "Choose") {
+				for (const item of element.allElements()) {
+					if (item.name === "When" && await properties.checkConditional(item.attributes.Condition)) {
+						await evaluatePropsAndImports(item.allElements(), properties, imports, modified);
+						break;
+						
+					} else if (item.name === "Otherwise") {
+						await evaluatePropsAndImports(item.allElements(), properties, imports, modified);
+					}
 				}
 			}
 		}
@@ -188,24 +340,6 @@ export const ItemMode = {
 };
 export type ItemMode = typeof ItemMode[keyof typeof ItemMode];
 
-//WELL-KNOWN ITEM METADATA
-//%(FullPath)					Contains the full path of the item.
-//%(RootDir)					Contains the root directory of the item.
-//%(Filename)					Contains the file name of the item, without the extension.
-//%(Extension)					Contains the file name extension of the item.
-//%(RelativeDir)				Contains the path specified in the Include attribute, up to the final backslash (\).
-//%(Directory)					Contains the directory of the item, without the root directory.
-//%(RecursiveDir)				If the Include attribute contains the wildcard **, this metadata specifies the part of the path that replaces the wildcard
-//%(Identity)					The item specified in the Include attribute.
-//%(ModifiedTime)				Contains the timestamp from the last time the item was modified.
-//%(CreatedTime)				Contains the timestamp from when the item was created.
-//%(AccessedTime)				Contains the timestamp from the last time the item was accessed	.2004-08-14 16:52:36.3168743
-//%(DefiningProjectFullPath)	Contains the full path of the project file (or imported file) that defines this item.
-//%(DefiningProjectDirectory)	Contains the project directory of the project file (or imported file) that defines this item.
-//%(DefiningProjectName)		Contains the name of the project file (or imported file) that defines this item (without the extension).
-//%(DefiningProjectExtension)	Contains the extension of the project file (or imported file) that defines this item.
-
-
 function getItemMode(name: string) {
 	return plainItems.has(name) ? ItemMode.Text : nonNormalItems.has(name) ? ItemMode.Other : ItemMode.File;
 }
@@ -231,36 +365,77 @@ function fixRelativePath(relativePath: string, link?: string): string {
 	return relativePath;
 }
 
+class CachedMetadata {
+	constructor(public properties: PropertyContext, public metadata: MetadataWithOrigins) {}
+}
 
-async function evaluate_data(items: xml.Element[], settings: Settings, properties: PropertyContext, modified: Origins) {
+async function evaluateMetadata(elements: xml.Element[], properties: PropertyContext, metadata: Metadata, origins: Origins) {
 
-	async function evaluate(item: xml.Element): Promise<EvaluatedValue> {
+	async function evaluate(item: xml.Element): Promise<any> {
 		if (item.firstElement())
-			return Object.fromEntries(await utils.async.map(item.allElements(), async i => [i.name, await evaluate(i)] as [string, EvaluatedValue]));
+			return Object.fromEntries(await utils.async.map(item.allElements(), async i => [i.name, await evaluate(i)] as [string, any]));
 	
 		const text = item.allText().join();
-		return properties.substitute(text)
-			.then(subs => utils.async_replace_back(subs, /%\((\w+)(\))/g, async (m: RegExpExecArray, right:string) => {
-				const replace = await settings[m[1]];
-				if (!replace) {
-					if (m[1] !== item.name)	// ignore %X = %X;...
-						console.log(`no % substitute for ${m[1]} while evaluating ${item.name}`);
-					return m[0] + right;
-				}
-				return replace + right;
-			}));
+		return properties.substitute(text, metadata);
 	}
 
-	for (const i of items) {
-		if (await properties.checkConditional(i.attributes.Condition)) {
-			settings[i.name] = await evaluate(i);
-			modified[i.name] = i;
+	for (const i of elements) {
+		if (await properties.checkConditional(i.attributes.Condition, metadata)) {
+			metadata[i.name]	= await evaluate(i);
+			origins[i.name]		= i;
 		}
 	}
 }
 
+async function hasConditional(condition: string | undefined, type: string, value: string) {
+	if (!condition || !condition.includes(type) || !condition.includes(value))
+		return undefined;
+	
+	condition = condition.replaceAll(type, value);
+	return await EvaluateExpressionPartial(condition);
+}
+
+function cloneNode(node: xml.Node): xml.Node {
+	if (xml.isElement(node))
+		return cloneElement(node);
+	return node;
+}
+
+function cloneElement(element: xml.Element): xml.Element {
+	return new xml.Element(element.name, {...element.attributes}, element.children.map(cloneNode));
+}
+
+function replaceConditionValue(condition: string, from: string, to: string): string {
+	return condition.replaceAll(from, to);
+}
+
+async function removeConditionals(elements: xml.Element[], type: string, value: string) {
+	return await utils.async.map(elements, async e => {
+		const has = await hasConditional(e.attributes.Condition, type, value);
+		if (typeof has === 'boolean') {
+			if (!has) {
+				e.parent?.remove(e);
+				return undefined;
+			} else {
+				delete e.attributes.Condition;
+			}
+		}
+		return e;
+	}).then(results => results.filter(Boolean) as xml.Element[]);
+}
+
+async function copyConditionals(elements: xml.Element[], type: string, from: string, to: string) {
+	return utils.async.map(elements, async e => {
+		const has = await hasConditional(e.attributes.Condition, type, from);
+		if (has === true) {
+			const cloned = cloneElement(e);
+			cloned.attributes.Condition = replaceConditionValue(e.attributes.Condition, from, to);
+			return cloned;
+		}
+	}).then(results => results.filter(Boolean) as xml.Element[]);
+}
+
 class XMLProjectItemEntry implements ProjectItemEntry {
-	private elements: xml.Element[];
 	data = new Proxy(this, {
 		get(target, prop: string) {
 			if (prop in target.other)
@@ -274,18 +449,17 @@ class XMLProjectItemEntry implements ProjectItemEntry {
 		ownKeys(target) {
 			return target.elements.map(e => e.name);
 		},
-		getOwnPropertyDescriptor(target, prop: string) {
+		getOwnPropertyDescriptor(_target, _prop: string) {
 			//if (prop in target.other || target.elements.find(e => e.name === prop))
 			return {configurable: true, enumerable: true, writable: true};
 		}
 	
 	}) as Record<string, any>;
+	elements:	xml.Element[];
+	cached:		CachedMetadata | undefined;
 
 	constructor(public name:string, public source?: xml.Element, private other: Record<string, any> = {}) {
 		this.elements = source?.allElements() ?? [];
-	}
-	async evaluate(settings: Settings, properties: PropertyContext, modified: Origins) {
-		return evaluate_data(this.elements, settings, properties, modified);
 	}
 	add(elements: xml.Element[], other: Record<string, any> = {}) {
 		for (const i of elements) {
@@ -293,8 +467,8 @@ class XMLProjectItemEntry implements ProjectItemEntry {
 			for (const j of alike)
 				utils.array.remove(this.elements, j);
 		}
-		this.elements = [...this.elements, ...elements];
-		this.other = {...this.other, ...other};
+		this.elements	= [...this.elements, ...elements];
+		this.other		= {...this.other, ...other};
 	}
 	modify(name: string, value: string, condition: string | undefined) {
 		const index = this.elements.findIndex(e => e.name === name && e.attributes.Condition === condition);
@@ -312,32 +486,29 @@ class XMLProjectItemEntry implements ProjectItemEntry {
 			return loc;
 		}
 	}
-	getElements() {
-		return this.elements;
+	toString() {
+		//return this.source?.attributes["Include"] ? await properties.substitute(this.source?.attributes["Include"]) : this.data.relativePath;
+		return this.source?.attributes["Include"] ?? this.data.relativePath;
 	}
+
 }
 
 interface Definition {
 	condition: 	string;
 	source?:	xml.Element;
-	data: 		xml.Element[];
+	elements:	xml.Element[];
 	isProject: 	boolean;
 };
 
-export interface SettingsWithOrigins {
-	settings: Record<string, any>;
-	origins: Origins;
-}
-
 export class Items {
 	definitions:	Definition[] = [];
-	roups:			xml.Element[] = [];
 	entries:		XMLProjectItemEntry[] = [];
+	cached:			CachedMetadata | undefined;
 
 	constructor(public name: string, public mode: ItemMode) {}
 
-	addDefinition(condition:string, data: xml.Element, isProject:boolean) {
-		this.definitions.push({condition: condition, source: data, data: data.allElements(), isProject: isProject});
+	addDefinition(condition: string, source: xml.Element, isProject:boolean) {
+		this.definitions.push({condition, source, elements: source.allElements(), isProject});
 	}
 
 	getDefinition(condition: string, isProject:boolean) : Definition {
@@ -345,46 +516,67 @@ export class Items {
 			if (d.condition === condition && d.isProject == isProject)
 				return d;
 		}
-		const d = {condition: condition, data: [], isProject: isProject};
+		const d = {condition, elements: [], isProject};
 		this.definitions.push(d);
 		return d;
 	}
 
-	async evaluate(properties: PropertyContext, entry?: XMLProjectItemEntry) : Promise<SettingsWithOrigins> {
-		const modified:	Origins		= {};
-		let settings:	Settings	= {};
+	async evaluate(properties: PropertyContext, entry?: XMLProjectItemEntry) : Promise<MetadataWithOrigins> {
+		if (!entry) {
+			if (this.cached && this.cached.properties === properties)
+				return this.cached.metadata;
 
-		if (entry) {
-			const fullPath 	= entry.data.fullPath;
+			const origins:	Origins		= {};
+			const metadata:	Metadata	= {};
+			for (const d of this.definitions) {
+				if (await properties.checkConditional(d.condition, metadata))
+					await evaluateMetadata(d.elements, properties, metadata, origins);
+			}
+			this.cached = new CachedMetadata(properties, {metadata, origins});
+			return {metadata, origins};
+		}
+
+		if (entry.cached && entry.cached.properties === properties)
+			return entry.cached.metadata;
+		
+		const defining	= path.parse(entry.data.defining);
+
+		const origins:	Origins		= {};
+		let metadata: Metadata = {
+			Identity:					entry.source?.attributes["Include"] ? await properties.substitute(entry.source?.attributes["Include"]) : entry.data.relativePath,
+			DefiningProjectFullPath:	entry.data.defining,
+			DefiningProjectDirectory:	defining.dir,
+			DefiningProjectName:		defining.name,
+			DefiningProjectExtension:	defining.ext,
+		};
+
+		const fullPath 	= entry.data.fullPath;
+		if (fullPath) {
 			const parsed 	= path.parse(fullPath);
-			const stat 		= new utils.Lazy<Promise<fs.Stats | undefined>>(async () => fs.promises.stat(fullPath));
-
-			settings = {
+			const stat 		= new utils.Lazy<Promise<fs.Stats | undefined>>(() => fs.promises.stat(fullPath));
+			metadata = {...metadata,
 				FullPath:					fullPath,
 				RootDir:					parsed.root,
 				Filename:					parsed.name,
 				Extension:					parsed.ext,
 				RelativeDir:				entry.data.relativePath,
-				Directory:					parsed.dir,
+				Directory:					parsed.dir.slice(parsed.root.length),
 				RecursiveDir:				path.dirname(entry.data.relativePath),
-				Identity:					"Identity",
 				get ModifiedTime()			{ return stat.then(s => s?.mtime.toISOString() ?? ''); },
 				get CreatedTime()			{ return stat.then(s => s?.ctime.toISOString() ?? ''); },
 				get AccessedTime()			{ return stat.then(s => s?.atime.toISOString() ?? ''); },
-				DefiningProjectFullPath:	"DefiningProjectFullPath",
-				DefiningProjectDirectory:	"DefiningProjectDirectory",
-				DefiningProjectName:		"DefiningProjectName",
-				DefiningProjectExtension:	"DefiningProjectExtension",
 			};
 		}
 
 		for (const d of this.definitions) {
 			if (await properties.checkConditional(d.condition))
-				await evaluate_data(d.data, settings, properties, modified);
+				await evaluateMetadata(d.elements, properties, metadata, origins);
 		}
-		if (entry)
-			await entry.evaluate(settings, properties, modified);
-		return {settings, origins: modified};
+
+		await evaluateMetadata(entry.elements, properties, metadata, origins);
+
+		entry.cached = new CachedMetadata(properties, {metadata, origins});
+		return {metadata, origins};
 	}
 
 	includePlain(name: string, source?: xml.Element, other: Record<string, any> = {}) {
@@ -392,33 +584,41 @@ export class Items {
 		if (item) {
 			item.add(source?.allElements() ?? [], other);
 		} else {
+			if (!source) {
+				source = new xml.Element(this.name, {Include: name});
+				for (const i in other)
+					 source.add(new xml.Element(i, undefined, [other[i]]));
+			}
 			this.entries.push(new XMLProjectItemEntry(name, source, other));
 		}
 	}
 
-	includeFile(basePath: string, fullPath: string, source: xml.Element, link?:string) {
-		const item = this.entries.find(e => e.data.fullPath === fullPath);
+	includeFile(defining: string, fullPath: string, source: xml.Element, link?:string) {
+		let item = this.entries.find(e => e.data.fullPath === fullPath);
 		if (item) {
 			if (source)
 				item.add(source.allElements());
 		} else {
-			this.entries.push(new XMLProjectItemEntry(
+			item = new XMLProjectItemEntry(
 				path.basename(fullPath), source, 
 				{
-					fullPath: 		fullPath,
-					relativePath: 	fixRelativePath(path.relative(basePath, fullPath), link),
+					fullPath,
+					defining,
+					relativePath: 	fixRelativePath(path.relative(path.dirname(defining), fullPath), link),
 					item: 			this,
 				}
-			));
+			);
+			this.entries.push(item);
 		}
+		return item;
 	}
 
-	async includeFiles(basePath: string, value: string, exclude: string | undefined, data: xml.Element, link?:string) {
+	async includeFiles(defining: string, value: string, exclude: string | undefined, data: xml.Element, link?:string) {
 		const excludes	= exclude?.split(";");
 		for (let pattern of value.split(';')) {
 			if ((pattern = pattern.trim())) {
-				for (const filepath of await search(path.resolve(basePath, pattern), excludes))
-					this.includeFile(basePath, filepath, data, link);
+				for (const filepath of await search(path.resolve(path.dirname(defining), pattern), excludes))
+					this.includeFile(defining, filepath, data, link);
 			}
 		}
 	}
@@ -445,34 +645,85 @@ export class Items {
 				return entry;
 	}
 
-	addSetting(name: string, value: string, condition: string | undefined, entry: XMLProjectItemEntry|undefined) : xml.Element | undefined {
+	async removeConditionals(type: string, value: string) {
+		this.definitions = await utils.async.map(this.definitions, async d => {
+			const has = await hasConditional(d.condition, type, value);
+			if (typeof has === 'boolean') {
+				if (!has) {
+					d.source?.parent?.remove(d.source);
+					return undefined;
+				} else {
+					d.condition = '';
+				}
+			}
+			d.elements = await removeConditionals(d.elements, type, value);
+			return d;
+		}).then(results => results.filter(Boolean) as Definition[]);
 
+		for (const e of this.entries)
+			e.elements = await removeConditionals(e.elements, type, value);
+	}
+
+	async copyConditionals(type: string, from: string, to: string) {
+		const newDefinitions = await utils.async.map(this.definitions, async d => {
+			d.elements.push(...await copyConditionals(d.elements, type, from, to));
+
+			if (!d.isProject || !d.source)
+				return d;
+
+			const has = await hasConditional(d.condition, type, from);
+			if (has === true) {
+				const root = (() => {
+					let p: xml.Element | undefined = d.source;
+					while (p?.parent)
+						p = p.parent;
+					return p;
+				})();
+
+				if (root) {
+					const newCondition = replaceConditionValue(d.condition, from, to);
+					const group = new xml.Element('ItemDefinitionGroup', {Condition: newCondition});
+					const newElements = [...d.elements, ...await copyConditionals(d.elements, type, from, to)];
+					const newSource = new xml.Element(this.name, {...d.source.attributes}, newElements);
+					group.add(newSource);
+					root.add(group);
+					return {condition: newCondition, source: group, elements: newElements, isProject: d.isProject};
+				}
+			}
+		}).then(results => results.filter(Boolean) as Definition[]);
+
+		this.definitions.push(...newDefinitions);
+
+		for (const e of this.entries)
+			e.elements.push(...await copyConditionals(e.elements, type, from, to));
+	}
+
+	addSetting(name: string, value: string, condition: string | undefined, entry: XMLProjectItemEntry|undefined) : xml.Element | undefined {
 		if (entry)
 			return entry.modify(name, value, condition);
 
 		let loc: xml.Element | undefined;
 		const d = this.getDefinition(condition || '', true);
-		for (const i of d.data) {
+		for (const i of d.elements) {
 			if (i.name === name) {
 				loc = i;
 				break;
 			}
 		}
 		if (value === '<inherit>') {
-			utils.array.remove(d.data, loc);
+			utils.array.remove(d.elements, loc);
 			return;
 			
 		} else if (loc) {
 			loc.setText(value);
 		} else {
 			loc = new xml.Element(name, undefined, [value]);
-			d.data.push(loc);
+			d.elements.push(loc);
 		}
 
 		return loc as xml.Element;
 	}
 }
-
 
 function MakeItemsProxy(items: Record<string, Items>) {
 	return new Proxy(items, {
@@ -499,23 +750,8 @@ function MakeItemsProxy(items: Record<string, Items>) {
 }
 
 async function readItems(elements: xml.Element[], properties: PropertyContext, allitems: Record<string, Items>, isProject: boolean): Promise<undefined> {
-	//phase4 : items
-/*
-	function getItems(name: string) {
-		if (!(name in allitems)) {
-			const lower = name.toLowerCase();
-			const found = Object.keys(allitems).find(e => e.toLowerCase() === lower);
-			if (found)
-				name = found;
-			else {
-				const mode = getItemMode(name);
-				allitems[name] = new Items(name, mode);
-			}
-		}
-		return allitems[name];
-	}
-*/
-	const basepath 	= properties.properties.MSBUILDTHISFILEDIRECTORY;
+	const defining 	= properties.currentPath();
+	const basepath 	= path.dirname(defining);
 
 	for (const element of elements) {
 		if (element.name === "ItemDefinitionGroup") {
@@ -531,18 +767,18 @@ async function readItems(elements: xml.Element[], properties: PropertyContext, a
 				if (name === "Reference" && item.attributes.Include) {
 					const include	= await properties.substitute_path(item.attributes.Include);
 					const sdk		= Locations.ParseSDKKey(include);
-					items.includePlain(sdk.identifier, item, {version: sdk.version});
+					items.includePlain(sdk.identifier, item, {defining, version: sdk.version});
 
 				} else if (name === "PackageReference" && item.attributes.Include && items.entries.length == 0 && await exists(path.join(basepath, 'packages.config'))) {
 					const config = await XMLCache.get(path.join(basepath, 'packages.config'));
 					if (config) {
 						for (const e of config.elements.packages.allElements())
-							items.includePlain(e.attributes.id, item, {version: e.attributes.version});
+							items.includePlain(e.attributes.id, item, {defining, version: e.attributes.version});
 					}
 
 				} else if (items.mode == ItemMode.Text && item.attributes.Include) {
 					const include = await properties.substitute(item.attributes.Include);
-					items.includePlain(include, item);
+					items.includePlain(include, item, {defining});
 					//{
 						//source:	item,
 						//...Object.fromEntries(item.allElements().filter(i => !i.firstElement()).map(i => [i.name, i.allText().join()]))
@@ -552,7 +788,7 @@ async function readItems(elements: xml.Element[], properties: PropertyContext, a
 					if (item.attributes.Include) {
 						const include = properties.substitute_path(item.attributes.Include);
 						const excludes = item.attributes.Exclude && properties.substitute_path(item.attributes.Exclude);
-						await items.includeFiles(basepath, await include, await excludes, item, getLink(item));
+						await items.includeFiles(defining, await include, await excludes, item, getLink(item));
 					}
 				
 					if (item.attributes.Remove)
@@ -569,30 +805,23 @@ async function readItems(elements: xml.Element[], properties: PropertyContext, a
 //-----------------------------------------------------------------------------
 //	Project
 //-----------------------------------------------------------------------------
-
-const MSBuildProperties : Record<string, string> = {
-//	VisualStudioVersion:			"17.0",
+// from MSBuild.exe.config
+const MSBuildProperties : Record<string, string | utils.Lazy<Promise<string>>> = {
+//	VsInstallRoot:					"$([MSBuild]::GetVsInstallRoot())",
+	MSBuildVersion:					"$(VisualStudioVersion)",
 	MSBuildToolsVersion:			"Current",
-	MSBuildToolsPath:				"$([MSBuild]::GetCurrentToolsDirectory())",
-	MSBuildToolsPath32:				"$([MSBuild]::GetToolsDirectory32())",
-	MSBuildToolsPath64:				"$([MSBuild]::GetToolsDirectory64())",
-	MSBuildSDKsPath:				"$([MSBuild]::GetMSBuildSDKsPath())",
+	MSBuildRuntimeVersion:			new utils.Lazy(() => Locations.getMSBuildRuntimeVersion()),
 	MSBuildProgramFiles32:			"$([MSBuild]::GetProgramFiles32())",
-	FrameworkSDKRoot:				"$([MSBuild]::GetRegistryValueFromView('HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Microsoft SDKs\\NETFXSDK\\4.8', 'InstallationFolder', null, RegistryView.Registry32))",
-//	MSBuildRuntimeVersion:			"4.0.30319",
-	MSBuildFrameworkToolsPath:		"$(SystemRoot)\\Microsoft.NET\\Framework\\v$(MSBuildRuntimeVersion)\\",
-	MSBuildFrameworkToolsPath32:	"$(SystemRoot)\\Microsoft.NET\\Framework\\v$(MSBuildRuntimeVersion)\\",
-	MSBuildFrameworkToolsPath64:	"$(SystemRoot)\\Microsoft.NET\\Framework64\\v$(MSBuildRuntimeVersion)\\",
-	MSBuildFrameworkToolsPathArm64:	"$(SystemRoot)\\Microsoft.NET\\FrameworkArm64\\v$(MSBuildRuntimeVersion)\\",
-	MSBuildFrameworkToolsRoot:		"$(SystemRoot)\\Microsoft.NET\\Framework\\",
-	SDK35ToolsPath:					"$([MSBuild]::GetRegistryValueFromView('HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Microsoft SDKs\\Windows\\v8.0A\\WinSDK-NetFx35Tools-x86', 'InstallationFolder', null, RegistryView.Registry32))",
-	SDK40ToolsPath:					"$([MSBuild]::ValueOrDefault($([MSBuild]::GetRegistryValueFromView('HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Microsoft SDKs\\NETFXSDK\\4.8.1\\WinSDK-NetFx40Tools-x86', 'InstallationFolder', null, RegistryView.Registry32)), $([MSBuild]::GetRegistryValueFromView('HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Microsoft SDKs\\NETFXSDK\\4.8\\WinSDK-NetFx40Tools-x86', 'InstallationFolder', null, RegistryView.Registry32))))",
-	WindowsSDK80Path:				"$([MSBuild]::GetRegistryValueFromView('HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Microsoft SDKs\\Windows\\v8.1', 'InstallationFolder', null, RegistryView.Registry32))",
-	VsInstallRoot:					"$([MSBuild]::GetVsInstallRoot())",
 	MSBuildToolsRoot:				"$(VsInstallRoot)\\MSBuild",
-	MSBuildExtensionsPath:			"$([MSBuild]::GetMSBuildExtensionsPath())",
-	MSBuildExtensionsPath32:		"$([MSBuild]::GetMSBuildExtensionsPath())",
-	RoslynTargetsPath:				"$([MSBuild]::GetToolsDirectory32())\\Roslyn",
+	MSBuildToolsPath32:				"$(VsInstallRoot)\\MSBuild\\Current\\Bin",
+	MSBuildToolsPath64:				"$(VsInstallRoot)\\MSBuild\\Current\\Bin\\amd64",
+	MSBuildToolsPath:				"$(MSBuildToolsPath64)",
+	MSBuildBinPath:					"$(MSBuildToolsPath64)",
+	MSBuildExtensionsPath:			"$(MSBuildToolsRoot)",
+	MSBuildExtensionsPath32:		"$(MSBuildToolsRoot)",
+	MSBuildExtensionsPath64:		"$(MSBuildProgramFiles32)\\MSBuild",
+	MSBuildSDKsPath:				"$(MSBuildToolsRoot)\\Sdks",
+	RoslynTargetsPath:				"$(MSBuildToolsPath32)\\Roslyn",
 	VCTargetsPath:					"$([MSBuild]::ValueOrDefault('$(VCTargetsPath)','$(MSBuildExtensionsPath32)\\Microsoft\\VC\\v170\\'))",
 	VCTargetsPath14:				"$([MSBuild]::ValueOrDefault('$(VCTargetsPath14)','$(MSBuildProgramFiles32)\\MSBuild\\Microsoft.Cpp\\v4.0\\V140\\'))",
 	VCTargetsPath12:				"$([MSBuild]::ValueOrDefault('$(VCTargetsPath12)','$(MSBuildProgramFiles32)\\MSBuild\\Microsoft.Cpp\\v4.0\\V120\\'))",
@@ -600,10 +829,19 @@ const MSBuildProperties : Record<string, string> = {
 	VCTargetsPath10:				"$([MSBuild]::ValueOrDefault('$(VCTargetsPath10)','$(MSBuildProgramFiles32)\\MSBuild\\Microsoft.Cpp\\v4.0\\'))",
 	AndroidTargetsPath:				"$(MSBuildExtensionsPath32)\\Microsoft\\MDD\\Android\\V150\\",
 	iOSTargetsPath:					"$(MSBuildExtensionsPath32)\\Microsoft\\MDD\\iOS\\V150\\",
-//	MSBuildExtensionsPath:			"$(MSBuildProgramFiles32)\\MSBuild",
-//	MSBuildExtensionsPath32:		"$(MSBuildProgramFiles32)\\MSBuild",
-	MSBuildExtensionsPath64:		"$(MSBuildProgramFiles32)\\MSBuild",
-	VSToolsPath:					"$(MSBuildProgramFiles32)\\MSBuild\\Microsoft\\VisualStudio\\v$(VisualStudioVersion)",
+//	VSToolsPath:					"$(MSBuildProgramFiles32)\\MSBuild\\Microsoft\\VisualStudio\\v$(VisualStudioVersion)",
+	LangID:							"$([MSBuild]::GetLangId())",
+	//windows only properties
+	MSBuildFrameworkToolsPath:		"$(SystemRoot)\\Microsoft.NET\\Framework\\v$(MSBuildRuntimeVersion)\\",
+	MSBuildFrameworkToolsPath32:	"$(SystemRoot)\\Microsoft.NET\\Framework\\v$(MSBuildRuntimeVersion)\\",
+	MSBuildFrameworkToolsPath64:	"$(SystemRoot)\\Microsoft.NET\\Framework64\\v$(MSBuildRuntimeVersion)\\",
+	MSBuildFrameworkToolsPathArm64:	"$(SystemRoot)\\Microsoft.NET\\FrameworkArm64\\v$(MSBuildRuntimeVersion)\\",
+	MSBuildFrameworkToolsRoot:		"$(SystemRoot)\\Microsoft.NET\\Framework\\",
+
+	FrameworkSDKRoot:				"$([MSBuild]::GetRegistryValueFromView('HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Microsoft SDKs\\NETFXSDK\\4.8', 'InstallationFolder', null, RegistryView.Registry32))",
+	SDK35ToolsPath:					"$([MSBuild]::GetRegistryValueFromView('HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Microsoft SDKs\\Windows\\v8.0A\\WinSDK-NetFx35Tools-x86', 'InstallationFolder', null, RegistryView.Registry32))",
+	SDK40ToolsPath:					"$([MSBuild]::ValueOrDefault($([MSBuild]::GetRegistryValueFromView('HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Microsoft SDKs\\NETFXSDK\\4.8.1\\WinSDK-NetFx40Tools-x86', 'InstallationFolder', null, RegistryView.Registry32)), $([MSBuild]::GetRegistryValueFromView('HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Microsoft SDKs\\NETFXSDK\\4.8\\WinSDK-NetFx40Tools-x86', 'InstallationFolder', null, RegistryView.Registry32))))",
+	WindowsSDK80Path:				"$([MSBuild]::GetRegistryValueFromView('HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Microsoft SDKs\\Windows\\v8.1', 'InstallationFolder', null, RegistryView.Registry32))",
 	WindowsKitsRoot:				"$([MSBuild]::GetRegistryValueFromView('HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows Kits\\Installed Roots', 'KitsRoot10', null, RegistryView.Registry32, RegistryView.Default))",
 };
 
@@ -648,6 +886,15 @@ function addPropertySetting(file: xml.Element|undefined, name: string, value: st
 	return loc as xml.Element;
 }
 
+function getItemGroup(root: xml.Element, condition?: string) {
+	for (const g of root.elements.ItemGroup) {
+		if (!g.attributes.Label && g.attributes.condition === condition)
+			return g;
+	}
+	const g = new xml.Element('ItemGroup', condition ? {condition} : undefined);
+	root.children.push(g);
+	return g;
+}
 
 async function getExtAssoc(pp: Items) {
 	const ext_assoc:	Record<string, string> = {};
@@ -672,61 +919,28 @@ async function getExtAssoc(pp: Items) {
 	return ext_assoc;
 }
 
-async function makeProjectProps(fullPath:string, globals: Record<string, string>, locals: string, Sdk: string): Promise<PropertyContext> {
-	const properties = new PropertyContext;
-
-	//phase1 : Evaluate environment variables
-	properties.addDirect(Object.fromEntries(Object.keys(process.env).filter(k => /^[A-Za-z_]\w+$/.test(k)).map(k => [k, process.env[k]??''])));
-
-	properties.addDirect(globals);
-	properties.setPath(fullPath);
-	properties.makeGlobal(Object.keys(globals));
-	properties.makeLocal(locals.split(';'));
-
-	const parsed = path.parse(fullPath);
-	await properties.add({
-		MSBuildProjectDirectory:	parsed.dir,
-		MSBuildProjectExtension:	parsed.ext,
-		MSBuildProjectFile:			parsed.base,
-		MSBuildProjectFullPath:		fullPath,
-		MSBuildProjectName:			parsed.name,
-		Sdk,
-	});
-
-	const temp = MSBuildProperties as Record<string, any>;
-	if (!temp.VisualStudioVersion)
-		temp.VisualStudioVersion = Locations.vsInstances.then(vs => `${vs.at(-1)?.Version.major ?? 17}.0`);
-	if (temp.VisualStudioVersion instanceof Promise)
-		temp.VisualStudioVersion = await temp.VisualStudioVersion;
-
-	if (!temp.MSBuildRuntimeVersion)
-		temp.MSBuildRuntimeVersion = Locations.getMSBuildRuntimeVersionFromFS();
-	if (temp.MSBuildRuntimeVersion instanceof Promise)
-		temp.MSBuildRuntimeVersion = await temp.MSBuildRuntimeVersion;
-
-	await properties.add(MSBuildProperties);
-	return properties;
-}
-
-interface PropertiesWithOrigins extends PropertyContext {
-	origins:	Origins;
-}
-
 export abstract class MsBuildBase extends Project {
 	raw_xml?:	xml.Element;
+	user_xml?:	xml.Element;
 	items: 		Record<string, Items> 	= {};
 	imports:	Imports					= {all:[]};	//currently parsed imports
 	ext_assoc	= new utils.Lazy(async () => getExtAssoc(this.items.PropertyPageSchema));
-
-	user_xml?:	xml.Element;
-	settings_ready	= Promise.resolve();
-	private project_dirty	= 0;
+	
+	settings_ready			= new utils.DeferredPromise<void>();
+	protected project_dirty	= 0;
 	private user_dirty		= 0;
 
 	constructor(container: ProjectContainer, type:string, name:string, fullpath: string, guid: string) {
 		super(container, type, name, fullpath, guid);
 		this.ready		= this.load();
 		xml_load(fullpath + ".user").then(doc => this.user_xml = doc);
+
+		container.watch(fullpath, () => {
+			this.ready = this.load();
+		});
+		container.watch(fullpath + ".user", () => {
+			xml_load(fullpath + ".user").then(doc => this.user_xml = doc);
+		});
 	}
 
 	get root() {
@@ -761,16 +975,15 @@ export abstract class MsBuildBase extends Project {
 				if (d.source && this.isMain(d.source)) {
 					if (!(d.condition in definitions))
 						definitions[d.condition] = {};
-					definitions[d.condition][i] = d.data;
+					definitions[d.condition][i] = d.elements;
 				}
 			}
 		}
 
 		const config	= this.items.ProjectConfiguration;
-
-		const element = new xml.Element('?xml', this.raw_xml?.attributes, [
+		const element	= new xml.Element('?xml', this.raw_xml?.attributes, [
 			new xml.Element('Project', root.attributes, [
-				new xml.Element("ItemGroup", {Label: 'ProjectConfigurations'}, config.entries.map(e => new xml.Element('ProjectConfiguration', {Include: e.name}, e.getElements()))),
+				new xml.Element("ItemGroup", {Label: 'ProjectConfigurations'}, config.entries.map(e => new xml.Element('ProjectConfiguration', {Include: e.name}, e.elements))),
 
 				...root.allElements().filter(i => i.name == 'PropertyGroup' || i.name == 'Import' || i.name == 'ImportGroup'),
 
@@ -783,7 +996,7 @@ export abstract class MsBuildBase extends Project {
 					.filter(i => i.mode == ItemMode.File || i.name === 'ProjectReference')
 					.map(i => ({name: i.name, entries: i.entries.filter(e => e.source && this.isMain(e.source))}))
 					.filter(i => i.entries.length)
-					.map(i => new xml.Element("ItemGroup", {}, i.entries.map(e => new xml.Element(i.name, {Include: e.data.relativePath}, e.getElements()))))
+					.map(i => new xml.Element("ItemGroup", {}, i.entries.map(e => new xml.Element(i.name, {Include: e.data.relativePath}, e.elements))))
 			])
 		]);
 
@@ -794,12 +1007,8 @@ export abstract class MsBuildBase extends Project {
 		return this.items[name] ??= new Items(name, getItemMode(name));
 	}
 
-	protected async import(importPath : string, props: PropertyContext, label = '') {
+	protected async import(importPath: string, props: PropertyContext, label = '') {
 		return evaluateImport(importPath, props, label, this.imports);
-	}
-
-	protected async readItems(props: PropertyContext) {
-		return readItems(this.root?.allElements()??[], props, this.items, true);
 	}
 
 	protected async readImportedItems(props: PropertyContext) {
@@ -810,33 +1019,6 @@ export abstract class MsBuildBase extends Project {
 			await readItems(root?.allElements()||[], props, this.items, false);
 			props.setPath(prev);
 		}
-	}
-
-	protected async getSettingRaw(user: xml.Element|undefined, props: PropertyContext, name: string) {
-		const imports : Imports 	= {all:[]};
-
-		await evaluatePropsAndImports(
-			[
-				...this.root?.allElements()??[],
-				...user?.firstElement()?.allElements()??[]
-			],
-			props,
-			imports
-		);
-		return props.properties[name];
-	}
-
-	protected getItemGroup(condition?: string) {
-		if (!this.raw_xml)
-			return;
-
-		for (const g of this.raw_xml.elements.ItemGroup) {
-			if (!g.attributes.Label && g.attributes.condition === condition)
-				return g;
-		}
-		const g = new xml.Element('ItemGroup', condition ? {condition} : undefined);
-		this.raw_xml.children.push(g);
-		return g;
 	}
 
 	validConfig(config: ProjectConfiguration) {
@@ -855,19 +1037,83 @@ export abstract class MsBuildBase extends Project {
 			: super.platformList();
 	}
 
+	async removeConfiguration(name: string) {
+		const configs = this.items.ProjectConfiguration;
+		if (configs) {
+			await utils.async.map(Object.values(this.items), async i => await i.removeConditionals('$(Configuration)', name));
+			configs.entries = configs.entries.filter(e => e.data.Configuration !== name);
+			this.project_dirty = 1;
+		}
+	}
+	async removePlatform(name: string) {
+		const configs = this.items.ProjectConfiguration;
+		if (configs) {
+			await utils.async.map(Object.values(this.items), async i => await i.removeConditionals('$(Platform)', name));
+			configs.entries = configs.entries.filter(e => e.data.Platform !== name);
+			this.project_dirty = 1;
+		}
+	}
+	async copyConfiguration(to: string, from: string) {
+		const configs = this.items.ProjectConfiguration;
+		if (!configs)
+			return;
+
+		const list		= [...new Set(configs.entries.map(i => i.data.Configuration))];
+		if (list.find(i => i === from) && !list.find(i => i === to)) {
+			await utils.async.map(Object.values(this.items), async i => await i.copyConditionals('$(Configuration)', from, to));
+			for (const i of this.platformList())
+				configs.includePlain(`${to}|${i}`, undefined, {Configuration: to, Platform: i});
+			this.project_dirty = 1;
+		}
+	}
+	async copyPlatform(to: string, from: string) {
+		const configs = this.items.ProjectConfiguration;
+		if (!configs)
+			return;
+
+		const list		= [...new Set(configs.entries.map(i => i.data.Platform))];
+		if (list.find(i => i === from) && !list.find(i => i === to)) {
+			await utils.async.map(Object.values(this.items), async i => await i.copyConditionals('$(Platform)', from, to));
+			for (const i of this.configurationList())
+				configs.includePlain(`${i}|${to}`, undefined, {Configuration: i, Platform: to});
+			this.project_dirty = 1;
+		}
+	}
+
 	protected async makeProjectProps(globals: Properties) {
-		return makeProjectProps(
-			this.fullpath,
-			{...globals, SolutionDir: this.solution_dir + path.sep},
-			this.root?.attributes.TreatAsLocalPropertys ?? '',
-			this.root?.attributes.Sdk ?? ''
-		);
+		const props = new PropertyContext;
+		props.items = this.items;
+		props.makeLocal(this.root?.attributes.TreatAsLocalPropertys?.split(';') ?? []);
+
+		// environment variables
+		props.addDirect(Object.fromEntries(Object.keys(process.env).filter(k => /^[A-Za-z_]\w+$/.test(k)).map(k => [k, process.env[k]??''])));
+
+		props.addDirect(globals);
+		props.makeGlobal(Object.keys(globals));
+		props.makeGlobal(['SolutionDir']);
+		props.setPath(this.fullpath);
+
+		const parsed = path.parse(this.fullpath);
+		props.addDirect({
+			FullPath:					this.fullpath,
+			FileName:					parsed.name,
+			Sdk:						this.root?.attributes.Sdk ?? '',
+			SolutionDir:				this.container.baseDir + path.sep,
+			MSBuildProjectFullPath:		this.fullpath,
+			MSBuildProjectDirectory:	parsed.dir + path.sep,
+			MSBuildProjectFile:			parsed.base,
+			MSBuildProjectName:			parsed.name,
+			MSBuildProjectExtension:	parsed.ext,
+		});
+
+		await props.add(await utils.async.mapObject(MSBuildProperties, async ([k, v]) => [k, await v]));
+		return props;
 	}
 
 	async postload(props: PropertyContext) {
-		await this.readItems(props);
-
-		this.settings_ready = this.readImportedItems(props);
+		await readItems(this.root?.allElements()??[], props, this.items, true);
+		await this.readImportedItems(props);
+		this.settings_ready.resolve();
 
 		if ('ProjectReference' in this.items) {
 			for (const i of this.items.ProjectReference.entries || [])
@@ -909,6 +1155,9 @@ export abstract class MsBuildBase extends Project {
 	}
 
 	async evaluateProps(globals: Properties): Promise<PropertiesWithOrigins> {
+		await this.ready;
+		await this.settings_ready;
+
 		const props = await this.makeProjectProps(globals);
 		const modified: Origins	= {};
 		await evaluatePropsAndImports(
@@ -929,7 +1178,8 @@ export abstract class MsBuildBase extends Project {
 
 		const root 	= this.root;
 		if (root?.name == 'Project') {
-			const props = await this.makeProjectProps({});
+			const solution	= this.container as Solution;
+			const props		= await this.makeProjectProps(solution.globals());
 			await evaluatePropsAndImports(this.root!.allElements(), props, this.imports);
 			await this.postload(props);
 			console.log(`loaded ${this.fullpath}`);
@@ -941,16 +1191,6 @@ export abstract class MsBuildBase extends Project {
 			this.project_dirty && ((this.project_dirty = 0), this.rawSave(this.fullpath)),
 			this.user_dirty && ((this.user_dirty = 0), xml_save(this.fullpath + ".user", this.user_xml!))
 		]);
-	}
-
-	solutionRead(_m: string[], _basePath: string) : ((line: string) => void) | undefined {
-		return undefined;
-	}
-	solutionWrite(_basePath: string) : string {
-		return '';
-	}
-	addFile(_name: string, _filepath: string): boolean {
-		return false;
 	}
 
 	removeEntry(entry: ProjectItemEntry): boolean {
@@ -1016,7 +1256,8 @@ export class MsBuildProject extends MsBuildBase {
 		await this.rawLoad(this.fullpath);
 		const root 	= this.root;
 		if (root?.name == 'Project') {
-			const globals: Properties = {};
+			const solution	= this.container as Solution;
+			const globals	= solution.globals();
 
 			// try and get first configuration
 			if (root.elements.ItemGroup) {
@@ -1043,9 +1284,10 @@ function ManagedProjectMaker(language: string) {
 			await this.rawLoad(this.fullpath);
 			const root 	= this.root;
 			if (root?.name == 'Project') {
-				const props = await this.makeProjectProps({});
+				const solution	= this.container as Solution;
+				const props 	= await this.makeProjectProps(solution.globals());
 				await evaluatePropsAndImports(this.root!.allElements(), props, this.imports);
-				await this.import(`${Locations.vsdir}\\MSBuild\\Microsoft\\VisualStudio\\Managed\\Microsoft.${language}.DesignTime.targets`, props);
+				await this.import(`${solution.installDir}\\MSBuild\\Microsoft\\VisualStudio\\Managed\\Microsoft.${language}.DesignTime.targets`, props);
 				await super.postload(props);
 			}
 		}
@@ -1054,43 +1296,46 @@ function ManagedProjectMaker(language: string) {
 
 function CPSProjectMaker(language: string, ext: string) {
 	return class P extends MsBuildBase {
+		async getSdk() {
+			return await Locations.getSdkPath(this.root!.attributes.Sdk ?? 'Microsoft.NET.Sdk', path.join(this.container.installDir, 'MSBuild', 'Sdks')) ?? '';
+		}
 		async load() {
 			await this.rawLoad(this.fullpath);
 
 			const root 	= this.root;
 			if (root?.name == 'Project') {
-				const props		= await this.makeProjectProps({});
-				const sdkPath	= await Locations.getSdkPath() ?? '';
-				await this.import(path.join(sdkPath, 'Sdk.props'), props);
+				const solution	= this.container as Solution;
+				const props		= await this.makeProjectProps({...solution.globals(), language});
+				const sdkPath	= await this.getSdk();
+				await this.import(path.join(sdkPath, 'Sdk', 'Sdk.props'), props);
 
-				const basePath	= path.dirname(this.fullpath);
-				await this.addItem('Compile').includeFiles(basePath, `**\\*.${ext}`, undefined, root);
-				await this.addItem('EmbeddedResource').includeFiles(basePath, '**\\*.resx', undefined, root);
+				await this.addItem('Compile').includeFiles(this.fullpath, `**\\*.${ext}`, undefined, root);
+				await this.addItem('EmbeddedResource').includeFiles(this.fullpath, '**\\*.resx', undefined, root);
 				const None = this.addItem('None');
-				await None.includeFiles(basePath, `**\\*`, '**\\*.user;**\\*.*proj;**\\*.sln;**\\*.vssscc', root);
-				None.removeFiles(basePath,  `**\\*.${ext};**/*.resx`);
+				await None.includeFiles(this.fullpath, `**\\*`, '**\\*.user;**\\*.*proj;**\\*.sln;**\\*.vssscc', root);
+				None.removeFiles(this.fullpath,  `**\\*.${ext};**/*.resx`);
 
 				await evaluatePropsAndImports(this.root!.allElements(), props, this.imports);
-				await this.import(path.join(sdkPath, 'Sdk.targets'), props);
-				await this.import(`${Locations.vsdir}\\MSBuild\\Microsoft\\VisualStudio\\Managed\\Microsoft.${language}.DesignTime.targets`, props);
+				await this.import(path.join(sdkPath, 'Sdk', 'Sdk.targets'), props);
+				//await this.import(`${solution.vs?.Path}\\MSBuild\\Microsoft\\VisualStudio\\Managed\\Microsoft.${language}.DesignTime.targets`, props);
 				super.postload(props);
 			}
 		}
 
 		async evaluateProps(globals: Properties) : Promise<PropertiesWithOrigins> {
-			const props 	= await this.makeProjectProps(globals);
-			const modified: Origins	= {};
-			const sdkpath	= await Locations.getSdkPath() ?? '';
+			const props 	= await this.makeProjectProps({...globals, language});
+			const sdkPath	= await this.getSdk();
+			const origins: Origins	= {};
 
-			await evaluateImport(path.join(sdkpath, 'Sdk.props'), props);
+			await evaluateImport(path.join(sdkPath, 'Sdk', 'Sdk.props'), props);
 			await evaluatePropsAndImports(
 				this.root?.allElements()??[],
 				props,
 				undefined,
-				modified
+				origins
 			);
-			await evaluateImport(path.join(sdkpath, 'Sdk.targets'), props);
-			return Object.assign(props, { origins: modified });
+			await evaluateImport(path.join(sdkPath, 'Sdk', 'Sdk.targets'), props);
+			return Object.assign(props, { origins });
 		}
 	};
 }
@@ -1102,7 +1347,7 @@ export class AndroidProject extends MsBuildBase {
 		await super.postload(props);
 		const gradle 	= this.items.GradlePackage;//.getDefinition('ProjectDirectory');
 		const result 	= await gradle.evaluate(new PropertyContext);
-		this.projectDir = path.join(path.dirname(this.fullpath), result.settings.ProjectDirectory);
+		this.projectDir = path.join(path.dirname(this.fullpath), (await result.metadata.ProjectDirectory) as string);
 	}
 }
 
@@ -1254,6 +1499,9 @@ export class VCProject extends MsBuildProject {
 	constructor(container: ProjectContainer, type:string, name:string, fullpath: string, guid: string) {
 		super(container, type, name, fullpath, guid);
 		this.filtertree		= this.loadFilters(this.fullpath + ".filters");
+		container.watch(this.fullpath + ".filters", () => {
+			this.filtertree = this.loadFilters(this.fullpath + ".filters");
+		});
 	}
 
 	private async loadFilters(fullPath : string): Promise<FilterTree> {
@@ -1262,30 +1510,30 @@ export class VCProject extends MsBuildProject {
 			for (const i of Object.values(this.items)) {
 				if (i.mode === ItemMode.File) {
 					//if (i.definitions.length)
-						for (const entry of i.entries)
-							allfiles[entry.data.fullPath] = entry;
+						for (const entry of i.entries) {
+							if (entry.source && this.isLocal(entry.source))
+								allfiles[entry.data.fullPath] = entry;
+						}
 				}
 			}
 			return loadFilterTree(fullPath, allfiles, this.removeEntry.bind(this));
 		});
 	}
 
-	addFile(name: string, filepath: string): boolean {
-		this.ext_assoc.value.then(ext_assoc => {
-			const ext = path.extname(name);
-			const ContentType = ext_assoc[ext];
-			if (ContentType) {
-				const group = this.getItemGroup();
-				if (group) {
-					const item	= this.items[ContentType];
-					const x		= new xml.Element(ContentType, {Include: name});
-					group.children.push(x);
-					item.includeFile(path.dirname(this.fullpath), filepath, x);
-					return true;
-				}
+	async addFile(name: string, filepath: string) {
+		const ext_assoc		= await this.ext_assoc.value;
+		const ext			= path.extname(name);
+		const ContentType	= ext_assoc[ext];
+		if (ContentType) {
+			const group = getItemGroup(this.root!);
+			if (group) {
+				++this.project_dirty;
+				const item	= this.items[ContentType];
+				const x		= new xml.Element(ContentType, {Include: name});
+				group.add(x);
+				return item.includeFile(this.fullpath, filepath, x);
 			}
-		});
-		return false;
+		}
 	}
 
 	async save() {

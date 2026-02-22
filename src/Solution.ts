@@ -1,17 +1,14 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as crypto from 'crypto';
-import * as binary from '@isopodlabs/binary';
+import * as bin from '@isopodlabs/binary';
 import * as CompDoc from '@isopodlabs/binary_libs/CompoundDocument';
 import * as utils from '@isopodlabs/utilities';
 import { ProjectContainer, Project, ProjectItemEntry, Folder, FolderTree } from './Project';
+import * as Locations from './Locations';
 
 class NonMSBuildProject extends Project {
-	async load() {}
-	async save() {}
-	addFile(_name: string, _filepath: string): boolean { return false; }
-
-	solutionRead(m: string[], _basePath: string) {
+	solutionRead(m: string[]) {
 		if (m[1] === "ProjectSection(ProjectDependencies)") {
 			return (s: string) => {
 				const m = assign_re.exec(s);
@@ -22,31 +19,27 @@ class NonMSBuildProject extends Project {
 	}
 
 
-	solutionWrite(_basePath: string) : string {
+	solutionWrite() : string {
 		return write_section('ProjectSection', 'ProjectDependencies', 'preProject', Object.fromEntries(this.dependencies.map(i => [i.name, i.name])));
 	}
-
-	getFolders(_view: string) : Promise<FolderTree> {
-		return Promise.resolve(new FolderTree);
-	}
-
 }
+
 export class SolutionFolder extends NonMSBuildProject {
    	get name()			{ return this._name; }
 	set name(v: string)	{ this._name = v; this.container.dirty(); }
 
 	solutionItems: ProjectItemEntry[] = [];
 
-	constructor(public container: ProjectContainer, type:string, name:string, fullpath: string, guid: string) {
+	constructor(container: ProjectContainer, type: string, name: string, fullpath: string, guid: string) {
 		super(container, type, name, fullpath, guid);
 	}
 
-	solutionRead(m: string[], basePath: string) {
+	solutionRead(m: string[]) {
 		if (m[1] === "ProjectSection(SolutionItems)") {
 			return (s: string) => {
 				const m = assign_re.exec(s);
 				if (m) {
-					const filepath = path.resolve(basePath, m[2].trim());
+					const filepath = path.resolve(this.container.baseDir, m[2].trim());
 					this.solutionItems.push( {
 						name: path.basename(m[1]),
 						data: {
@@ -57,24 +50,27 @@ export class SolutionFolder extends NonMSBuildProject {
 				}
 			};
 		}
+		super.solutionRead(m);
 	}
-	solutionWrite(basePath: string) : string {
-		return super.solutionWrite(basePath) + write_section('ProjectSection', 'SolutionItems', 'preProject', Object.fromEntries(this.solutionItems.map(i => {
+	solutionWrite() : string {
+		const basePath = this.container.baseDir;
+		return super.solutionWrite() + write_section('ProjectSection', 'SolutionItems', 'preProject', Object.fromEntries(this.solutionItems.map(i => {
 			const rel = path.relative(basePath, i.data.fullPath);
 			return [rel, rel];
 		})));
 	}
 
-	addFile(name: string, filepath: string): boolean {
-		this.solutionItems.push( {
+	async addFile(name: string, filepath: string) {
+		const item = {
 			name: name,
 			data: {
 				fullPath: filepath,
 				relativePath: path.relative(this.fullpath, filepath),
 			}
-		});
+		};
+		this.solutionItems.push(item);
 		this.container.dirty();
-		return true;
+		return item;
 	}
 	
 	getFolders(_view: string) : Promise<FolderTree> {
@@ -93,11 +89,11 @@ export class SolutionFolder extends NonMSBuildProject {
 
 }
 
-export class WebProject extends NonMSBuildProject {
+export class WebProject extends Project {
 	webProperties:	Record<string, string> = {};
 
-	solutionWrite(basePath: string) : string {
-		return super.solutionWrite(basePath) + write_section('ProjectSection', 'WebsiteProperties', 'preProject', this.webProperties);
+	solutionWrite() : string {
+		return super.solutionWrite() + write_section('ProjectSection', 'WebsiteProperties', 'preProject', this.webProperties);
 	}
 
 	solutionRead(m: string[]) {
@@ -108,6 +104,7 @@ export class WebProject extends NonMSBuildProject {
 					this.webProperties[m[1]] = m[2].trim();
 			};
 		}
+		super.solutionRead(m);
 	}
 	getFolders(_view: string) {
 		return Promise.resolve(new FolderTree());
@@ -199,69 +196,123 @@ function write_section(type:string, name:string, when: string, section: Record<s
 //	suo helpers
 //-----------------------------------------------------------------------------
 
-const string0Type	= binary.StringType(binary.UINT32_LE, 'utf16le', true);
-const stringType	= binary.StringType(binary.UINT32_LE, 'utf16le', false);
-const string1Type	= binary.StringType(binary.UINT32_LE, 'utf16le', true, 1);
-const stringArrayType = binary.ArrayType(binary.UINT32_LE, string1Type);
+const string1Type		= bin.StringType(bin.UINT32_LE, 'utf16le', true, 1);
+const stringArrayType	= bin.ArrayType(bin.UINT32_LE, string1Type);
 
-function read_token(reader: binary.stream) {
-	const token = binary.read(reader, binary.UINT16_LE);
-	switch (token) {
-		case 3: return binary.read(reader, binary.UINT32_LE);
-		case 8: return binary.read(reader, stringType);
-		default: return String.fromCharCode(token);
+const VT: Record<string, {tag: number, type: bin.TypeT<any>}> = {
+	EMPTY:			   {tag: 0,      type: bin.UINT16_LE},								// VT_EMPTY
+	NULL:			   {tag: 1,      type: bin.UINT16_LE},								// VT_NULL
+	I2:			       {tag: 2,      type: bin.INT16_LE},								// VT_I2
+	I4:			       {tag: 3,      type: bin.INT32_LE},								// VT_I4
+	R4:			       {tag: 4,      type: bin.Float32_LE},								// VT_R4
+	R8:			       {tag: 5,      type: bin.Float64_LE},								// VT_R8
+//	CY:			       {tag: 6,      type: bin.UINT16_LE},								// VT_CY
+//	DATE:			   {tag: 7,      type: bin.UINT16_LE},								// VT_DATE
+	BSTR:			   {tag: 8,      type: bin.StringType(bin.UINT32_LE, 'utf16le')},	// VT_BSTR
+//	DISPATCH:		   {tag: 9,      type: bin.UINT16_LE},								// VT_DISPATCH
+//	ERROR:			   {tag: 10,     type: bin.UINT16_LE},								// VT_ERROR
+	BOOL:			   {tag: 11,     type: bin.UINT16_LE},								// VT_BOOL
+//	VARIANT:		   {tag: 12,     type: bin.UINT16_LE},								// VT_VARIANT
+//	UNKNOWN:		   {tag: 13,     type: bin.UINT16_LE},								// VT_UNKNOWN
+//	DECIMAL:		   {tag: 14,     type: bin.UINT16_LE},								// VT_DECIMAL
+	I1:			       {tag: 16,     type: bin.INT8},									// VT_I1
+	UI1:			   {tag: 17,     type: bin.UINT8},									// VT_UI1
+	UI2:			   {tag: 18,     type: bin.UINT16_LE},								// VT_UI2
+	UI4:			   {tag: 19,     type: bin.UINT32_LE},								// VT_UI4
+	I8:			       {tag: 20,     type: bin.INT64_LE},								// VT_I8
+	UI8:			   {tag: 21,     type: bin.UINT64_LE},								// VT_UI8
+	INT:			   {tag: 22,     type: bin.INT32_LE},								// VT_INT
+	UINT:			   {tag: 23,     type: bin.UINT32_LE},								// VT_UINT
+//	VOID:			   {tag: 24,     type: bin.UINT32_LE},								// VT_VOID
+//	HRESULT:		   {tag: 25,     type: bin.UINT32_LE},								// VT_HRESULT
+//	PTR:			   {tag: 26,     type: bin.UINT32_LE},								// VT_PTR
+//	SAFEARRAY:		   {tag: 27,     type: bin.UINT32_LE},								// VT_SAFEARRAY
+//	CARRAY:			   {tag: 28,     type: bin.UINT32_LE},								// VT_CARRAY
+//	USERDEFINED:	   {tag: 29,     type: bin.UINT32_LE},								// VT_USERDEFINED
+//	LPSTR:			   {tag: 30,     type: bin.UINT32_LE},								// VT_LPSTR
+//	LPWSTR:			   {tag: 31,     type: bin.UINT32_LE},								// VT_LPWSTR
+//	RECORD:			   {tag: 36,     type: bin.UINT32_LE},								// VT_RECORD
+//	INT_PTR:		   {tag: 37,     type: bin.UINT32_LE},								// VT_INT_PTR
+//	UINT_PTR:		   {tag: 38,     type: bin.UINT32_LE},								// VT_UINT_PTR
+//	FILETIME:		   {tag: 64,     type: bin.UINT32_LE},								// VT_FILETIME
+//	BLOB:			   {tag: 65,     type: bin.UINT32_LE},								// VT_BLOB
+//	STREAM:			   {tag: 66,     type: bin.UINT32_LE},								// VT_STREAM
+//	STORAGE:		   {tag: 67,     type: bin.UINT32_LE},								// VT_STORAGE
+//	STREAMED_OBJECT:   {tag: 68,     type: bin.UINT32_LE},								// VT_STREAMED_OBJECT
+//	STORED_OBJECT:	   {tag: 69,     type: bin.UINT32_LE},								// VT_STORED_OBJECT
+//	BLOB_OBJECT:	   {tag: 70,     type: bin.UINT32_LE},								// VT_BLOB_OBJECT
+//	CF:			       {tag: 71,     type: bin.UINT32_LE},								// VT_CF
+//	CLSID:			   {tag: 72,     type: bin.UINT32_LE},								// VT_CLSID
+//	VERSIONED_STREAM:  {tag: 73,     type: bin.UINT32_LE},								// VT_VERSIONED_STREAM
+//	BSTR_BLOB:		   {tag: 0xfff,  type: bin.UINT32_LE},								// VT_BSTR_BLOB
+//	VECTOR:		       {tag: 0x1000, type: bin.UINT32_LE},								// VT_VECTOR
+//	ARRAY:		       {tag: 0x2000, type: bin.UINT32_LE},								// VT_ARRAY
+//	BYREF:		       {tag: 0x4000, type: bin.UINT32_LE},								// VT_BYREF
+};
+const VARIANT_BY_TAG: Record<number, bin.TypeT<any>> = Object.fromEntries(Object.values(VT).map(i => [i.tag, i.type]));
+
+const suoVariant = {
+	get(reader: bin.stream) {
+		const tag	= bin.read(reader, bin.UINT16_LE);
+		const type	= VARIANT_BY_TAG[tag & 0x7ff];
+		if (type) {
+			if (tag & 0x2000)
+				return bin.readn(reader, type, bin.read(reader, bin.UINT32_LE));
+			return type.get(reader);
+		}
+		return String.fromCharCode(tag);
+	},	
+	put(writer: bin.stream, value: any) {
+		let tag;
+		switch (typeof value) {
+			case 'number':	tag = 3; break;	//VT_I4
+			case 'string':
+				if (value.length == 1) {
+					bin.write(writer, bin.UINT16_LE, value.charCodeAt(0));
+					return;
+				}
+				tag = 8; // VT_BSTR
+				break;
+			case 'object':
+				if (Array.isArray(value)) {
+					switch (typeof value[0]) {
+						case 'number':	tag = 0x2003; break;	// VT_VECTOR | VT_I4
+						case 'string':	tag = 0x2008; break;	// VT_VECTOR | VT_BSTR
+						default:	throw "bad array type";
+					}
+					bin.write(writer, {tag: bin.UINT16_LE, value: bin.ArrayType(bin.UINT32_LE, VARIANT_BY_TAG[tag & 0x7ff])}, {tag, value});
+				}
+				// fallthrough
+			default:
+				throw "bad token";
+		}
+		bin.write(writer, {tag: bin.UINT16_LE, value: VARIANT_BY_TAG[tag]}, {tag, value});
 	}
-}
+};
 
-function read_config(data: Uint8Array) {
-	const config : Record<string, any> = {};
-	const reader = new binary.stream(data);
-	while (reader.remaining()) {
-		const name = binary.read(reader, string0Type);
-		let _token = read_token(reader);	//=
-		const value = read_token(reader);
-		config[name] = value;
-		_token = read_token(reader);//';'
-	}
+const suoSolutionConfiguration = bin.RemainingArrayType({
+	name:		bin.StringType(bin.UINT32_LE, 'utf16le', true),
+	equals:		bin.Expect(suoVariant, '='),
+	value:		suoVariant,
+	semicolon:	bin.Expect(suoVariant, ';')
+});
 
-	return config;
-}
+const suoDebuggerFindSource = {
+	ver:		bin.SkipType(4),	//version?
+	unk:		bin.SkipType(4),	//unknown
+	include:	stringArrayType,
+	unk2:		bin.SkipType(4),	//unknown
+	exclude:	stringArrayType
+};
 
-function write_token(writer: binary.stream, token: any) {
-	switch (typeof token) {
-		case 'number': binary.write(writer, binary.UINT16_LE, 3); binary.write(writer, binary.UINT32_LE, token); break;
-		case 'string': binary.write(writer, binary.UINT16_LE, 8); binary.write(writer, stringType, token); break;
-		default: throw "bad token";
-	}
-}
-function write_char_token(writer: binary.stream, token: string) {
-	binary.write(writer, binary.UINT16_LE, token.charCodeAt(0));
-}
-
-function write_config(config : Record<string, any>): Uint8Array {
-	const writer = new binary.growingStream();
-	Object.entries(config).forEach(([name, value]) => {
-		binary.write(writer, string0Type, name);
-		write_char_token(writer, '=');	//=
-		write_token(writer, value);
-		write_char_token(writer, ';');	//=
-	});
-	return writer.terminate();
-}
-
-async function open_suo(filename: string) : Promise<CompDoc.Reader> {
+async function open_suo(filename: string) : Promise<CompDoc.Reader | undefined> {
 	return fs.promises.readFile(filename).then(bytes => {
 		if (bytes) {
-			const h = new CompDoc.Header(new binary.stream(bytes));
+			const h = new CompDoc.Header(new bin.stream(bytes));
 			if (h.valid())
 				return new CompDoc.Reader(bytes.subarray(h.sector_size()), h);
 		}
-		throw('invalid');
-	});
-}
-
-function suo_path(filename: string) {
-	return path.join(path.dirname(filename), '.vs', 'shared', 'v17', '.suo');
+	}).catch(() => undefined);
 }
 
 //-----------------------------------------------------------------------------
@@ -270,21 +321,50 @@ function suo_path(filename: string) {
 
 export class Solution implements ProjectContainer {
 	projects:		Record<string, Project> = {};
-	parents:			Record<string, Project> = {};
+	parents:		Record<string, Project> = {};
 	debug_include:	string[]	= [];
 	debug_exclude:	string[]	= [];
+
+	private vs?: Locations.VisualStudioInstance;
 
 	private config_list: 	string[]	= [];
 	private platform_list: 	string[]	= [];
 
 	private header						= '';
-	private VisualStudioVersion			= '';
-	private MinimumVisualStudioVersion	= '';
+	public VisualStudioVersion			= '';
+	public MinimumVisualStudioVersion	= '';
 	private global_sections: Record<string, {section: Record<string, string>, when:string}> = {};
 	private	active						= [0, 0];
 	private	config:			Record<string, any> = {};
 	private _dirty			= false;
 	private _dirty_suo		= false;
+
+	protected constructor(public fullpath: string) {
+	}
+	
+	//interface ProjectContainer
+	dirty() {
+		this._dirty = true;
+	}
+	watch(_glob: string, _func: (fullpath: string, mode: number) => void): void {
+	}
+	dispose() {
+		utils.async.map(Object.keys(this.projects), async k => this.projects[k].save());
+	}
+	get baseDir() {
+		return path.dirname(this.fullpath);
+	}
+	get installDir() {
+		return this.vs?.Path ?? '';
+	}
+
+	private majorVersion() {
+		return +this.VisualStudioVersion.split('.')[0];
+	}
+	private suo_path() {
+		const parsed = path.parse(this.fullpath);
+		return path.join(parsed.dir, '.vs', parsed.name, `v${this.majorVersion()}`, '.suo');
+	}
 
 	get startup() : Project | undefined {
 		return this.projects[this.config.StartupProject];
@@ -323,33 +403,25 @@ export class Solution implements ProjectContainer {
 			this.dirty_suo();
 		}
 	}
-
-	projectActiveConfiguration(project: Project) {
-		const c = project.configuration[this.active.join('|')];
-		return {
-			Configuration:	c?.Configuration ?? this.config_list[this.active[0]],
-			Platform: 		c?.Platform ?? this.platform_list[this.active[1]],
-		};
-	}
-
 	get childProjects() {
 		return Object.keys(this.projects).filter(p => !this.parents[p]).map(p => this.projects[p]);
 	}
 
-	get basedir() {
-		return path.dirname(this.fullpath);
+	globals(): Record<string, string> {
+		return {
+			VisualStudioVersion:	`${this.majorVersion()}.0`,
+			VsInstallRoot:			this.vs?.Path ?? '?',
+			//VCTargetsPath:			this.vs?.VCTargetsPath + '\\',
+		};
 	}
-
-	protected constructor(public fullpath: string) {
-	}
-
-	dispose() {
-		utils.async.map(Object.keys(this.projects), async k => this.projects[k].save());
-	}
-
-	dirty() {
-		this._dirty = true;
-	}
+	projectActiveConfiguration(project: Project) {
+		const c = project.configuration[this.active.join('|')];
+		return {
+			Configuration:			c?.Configuration ?? this.config_list[this.active[0]],
+			Platform: 				c?.Platform ?? this.platform_list[this.active[1]],
+			...this.globals()
+		};
+	}	
 
 	private dirty_suo() {
 		this._dirty_suo = true;
@@ -357,25 +429,28 @@ export class Solution implements ProjectContainer {
 
 	async save() {
 		if (this._dirty_suo) {
-			const suopath = suo_path(this.fullpath);
-			open_suo(suopath).then(suo => {
+			this._dirty_suo = false;
+			const suopath	= this.suo_path();
+			const suo		= await open_suo(suopath);
+			if (suo) {
 				const configStream = suo.find("SolutionConfiguration");
 				if (configStream) {
-					const config	= this.config;
-					const data2 	= write_config(config);
-					const config2	= read_config(data2);
-					console.log(config2.toString());
-					suo.write(configStream, data2);
-					suo.flush(suopath);
+					const writer	= new bin.growingStream();
+					const data		= Object.entries(this.config).map(([name, value]) => ({name, value}));
+					bin.write(writer, suoSolutionConfiguration, data);
+					suo.write(configStream, writer.terminate());
+					await suo.flush(suopath);
 				}
-			});
+			}
 		}
-		if (this._dirty)
+		if (this._dirty) {
+			this._dirty = false;
 			await fs.promises.writeFile(this.fullpath, this.format());
+		}
 
+		await Promise.all(Object.values(this.projects).map(proj => proj.save()));
 	}
 
-//	static async load<T extends Solution>(this: new (fullpath: string) => T, fullpath: string): Promise<T | undefined> {
 	static async load(fullpath: string): Promise<Solution | undefined> {
 		async function getParser() {
 			const bytes		= await fs.promises.readFile(fullpath);
@@ -395,44 +470,41 @@ export class Solution implements ProjectContainer {
 		const parser = await getParser();
 		if (parser) {
 			const solution = new this(fullpath);
+			await solution.parse(parser);
 
-			const aconfig = open_suo(suo_path(fullpath)).then(suo => {
+			const suo = await open_suo(solution.suo_path());
+			if (suo) {
 				const sourceStream = suo.find("DebuggerFindSource");
 				if (sourceStream) {
-					const reader = new binary.stream(suo.read(sourceStream));
-					reader.skip(4);
-					reader.skip(4);
-					solution.debug_include = binary.read(reader, stringArrayType);
-					reader.skip(4);
-					solution.debug_exclude = binary.read(reader, stringArrayType);
+					const source = bin.read(new bin.stream(suo.read(sourceStream)), suoDebuggerFindSource);
+					solution.debug_include = source.include;
+					solution.debug_exclude = source.exclude;
 				}	
 
 				const configStream = suo.find("SolutionConfiguration");
-				return configStream && read_config(suo.read(configStream));
+				if (configStream) {
+					const data0		= suo.read(configStream);
+					const config	= bin.read(new bin.stream(data0), suoSolutionConfiguration);
+					solution.config	= config.reduce((acc, {name, value}) => (acc[name] = value, acc), {} as Record<string, any>);
+				}
 
-			}).catch(error => (console.log(error), undefined));
-	
-			solution.parse(parser);
-	
-			solution.config = await aconfig ?? {};
-			const parts		= solution.config.ActiveCfg.split('|');
-			solution.active	= [Math.max(solution.config_list.indexOf(parts[0]), 0), Math.max(solution.platform_list.indexOf(parts[1]), 0)];
+				if (solution.config.ActiveCfg) {
+					const parts		= solution.config.ActiveCfg.split('|');
+					solution.active	= [Math.max(solution.config_list.indexOf(parts[0]), 0), Math.max(solution.platform_list.indexOf(parts[1]), 0)];
+				}
+			}
 			return solution;
 		}
 	}
 
-	private parse(parser : LineParser) {
+	private async parse(parser : LineParser) {
 		this.header						= parser.currentLine();
-		this.config_list.length 		= 0;
-		this.platform_list.length 		= 0;
 		this.VisualStudioVersion		= '';
 		this.MinimumVisualStudioVersion	= '';
 		this.global_sections			= {};
 		this.projects					= {};
 
-		let str:	string | null;
-		let m:		RegExpExecArray | null;
-		const basePath	= path.dirname(this.fullpath);
+		let str, m;
 
 		while ((str = parser.readLine()) !== null) {
 			if ((m = assign_re.exec(str))) {
@@ -441,6 +513,7 @@ export class Solution implements ProjectContainer {
 
 				if (name === "VisualStudioVersion") {
 					this.VisualStudioVersion = value;
+					this.vs = await Locations.vsInstances.then(vs => vs?.byVersion(this.majorVersion()));
 
 				} else if (name === "MinimumVisualStudioVersion") {
 					this.MinimumVisualStudioVersion = value;
@@ -449,11 +522,11 @@ export class Solution implements ProjectContainer {
 					const type = m[1];
 					if ((m = /"(.*)"\s*,\s*"(.*)"\s*,\s*"(.*)"/.exec(value))) {
 						const guid 	= m[3];
-						const proj 	= Project.getFromId(guid) ?? Project.create(this, type, m[1], path.resolve(basePath, m[2]), guid);
+						const proj 	= Project.getFromId(guid) ?? Project.create(this, type, m[1], path.resolve(path.dirname(this.fullpath), m[2]), guid);
 						this.projects[guid] = proj;
 
 						parser.parseSection_re("EndProject", assign_re, m => {
-							const f = proj.solutionRead(m, basePath)
+							const f = proj.solutionRead(m)
 								?? (m[1] === "ProjectSection(ProjectDependencies)" ? (s: string) => {
 									const m = assign_re.exec(s);
 									if (m)
@@ -464,7 +537,7 @@ export class Solution implements ProjectContainer {
 					}
 
 				} else if ((m = /GlobalSection\((.*)\)/.exec(name))) {
-					const section : Record<string, string> = {};
+					const section: Record<string, string> = {};
 					parser.parseSection_re("EndGlobalSection", assign_re, m => section[m[1]] = m[2].trim());
 					this.global_sections[m[1]] = {section: section, when: value};
 				}
@@ -508,7 +581,7 @@ export class Solution implements ProjectContainer {
 					const deploy 	= rawProjectConfigurationsEntries[configuration + ".Deploy.0"];
 					const key		= [config_map[c[0]], platform_map[c[1]]].join('|');
 					const parts 	= config.split('|');
-					project.setProjectConfiguration(key, {Configuration:parts[0], Platform:parts[1], build:!!build, deploy:!!deploy});
+					project.setProjectConfiguration(key, {Configuration:parts[0], Platform:parts[1], build: !!build, deploy: !!deploy});
 				}
 			}
 		}
@@ -524,7 +597,7 @@ export class Solution implements ProjectContainer {
 		for (const p in this.projects) {
 			const proj = this.projects[p];
 			out += `Project("${proj.type}") = "${proj.name}", "${path.relative(basePath, proj.fullpath)}", "${p}"\n`;
-			out += proj.solutionWrite(basePath);
+			out += proj.solutionWrite();
 			out += "EndProject\n";
 		}
 
@@ -567,7 +640,6 @@ export class Solution implements ProjectContainer {
 			out += write_section('GlobalSection', i, this.global_sections[i].when, section);
 		}
 		out += "EndGlobal\n";
-
 		return out;
 	}
 
@@ -581,9 +653,12 @@ export class Solution implements ProjectContainer {
 	private makeProxy(array: string[]) {
 		return new Proxy(array, {
 			set: (target: string[], prop: string, value: string) => {
-				target[+prop] = value;
-				this.dirty();
-				return true;
+				if (!isNaN(+prop)) {
+					target[+prop] = value;
+					this.dirty();
+					return true;
+				}
+				return prop === 'length';
 			},
 			deleteProperty: (target: string[], prop: string) => {
 				delete target[+prop];
@@ -604,8 +679,8 @@ export class Solution implements ProjectContainer {
 			proj.guid = crypto.randomUUID();
 
 		//make histograms of all mappings from solution config/plat to project config/plat
-		const chistogram: Histogram[] = utils.array.make(this.config_list.length, Histogram);
-		const phistogram: Histogram[] = utils.array.make(this.platform_list.length, Histogram);
+		const chistogram = utils.array.make(this.config_list.length, Histogram);
+		const phistogram = utils.array.make(this.platform_list.length, Histogram);
 
 		for (const c in this.config_list) {
 			chistogram[c] = new Histogram;
@@ -661,5 +736,29 @@ export class Solution implements ProjectContainer {
 		this.parents[project.guid]?.removeProject(project);
 		delete this.projects[project.guid];
 		this.dirty();
+	}
+
+	private copyConfigs(keyTo: string, keyFrom: string) {
+		Object.values(this.projects).forEach(p => {
+			if (p.configuration[keyFrom])
+				p.configuration[keyTo] = p.configuration[keyFrom];
+		});
+	}
+
+	copyConfiguration(to: string, from: string) {
+		const idFrom	= this.config_list.findIndex(i => i === from);
+		const idTo 		= this.config_list.findIndex(i => i === to);
+		if (idFrom < 0 || idTo < 0)
+			return;
+		for (const i in this.platform_list)
+			this.copyConfigs(`${idTo}|${i}`, `${idFrom}|${i}`);
+	}
+	copyPlatform(to: string, from: string) {
+		const idFrom	= this.platform_list.findIndex(i => i === from);
+		const idTo 		= this.platform_list.findIndex(i => i === to);
+		if (idFrom < 0 || idTo < 0)
+			return;
+		for (const i in this.config_list)
+			this.copyConfigs(`${i}|${idTo}`, `${i}|${idFrom}`);
 	}
 }

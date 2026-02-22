@@ -1,5 +1,6 @@
 import * as fs from 'fs';
 import * as path from 'path';
+import * as child_process from 'child_process';
 import * as utils from '@isopodlabs/utilities';
 import * as xml from '@isopodlabs/xml';
 
@@ -8,12 +9,36 @@ export { Solution, SolutionFolder } from './Solution';
 export { MsBuildBase, MsBuildProject, Items, PropertyContext, Origins } from './MsBuild';
 export * as Locations from './Locations';
 
+export const stats = {
+	depth: 0,
+	exists: 0,
+	checkConditional: 0,
+};
+
 //-----------------------------------------------------------------------------
 //	fs helpers
 //-----------------------------------------------------------------------------
 
-export function exists(file: string): Promise<boolean> {
-	return fs.promises.access(file).then(() => true).catch(() => false);
+export async function exists(file: string): Promise<boolean> {
+	stats.exists++;
+	try {
+		await fs.promises.access(file);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+export async function readDirectory(file: string) {
+	try {
+		return await fs.promises.readdir(file, { withFileTypes: true });
+	} catch {
+		return [] as fs.Dirent[];
+	}
+}
+
+export function directories(files: fs.Dirent[]) {
+	return files.filter(e => e && e.isDirectory()).map(e => e.name);
 }
 
 
@@ -21,12 +46,17 @@ export class Glob {
 	private readonly regexp: RegExp;
 
 	constructor(pattern: string | string[]) {
-		if (typeof pattern === 'string' && pattern.includes(';'))
-			pattern = pattern.split(';');
-		const re = Array.isArray(pattern)
-			? '(' + pattern.map(s => toRegExp(s)).join('|') + ')'
-			: toRegExp(pattern);
-		this.regexp = new RegExp(re + '$');
+		try {
+			if (typeof pattern === 'string' && pattern.includes(';'))
+				pattern = pattern.split(';');
+			const re = Array.isArray(pattern)
+				? '(' + pattern.map(s => toRegExp(s)).join('|') + ')'
+				: toRegExp(pattern);
+			this.regexp = new RegExp(re + '$');
+		} catch (error) {
+			this.regexp = /./g;
+			console.log(`Invalid glob pattern ${pattern} : ${error}`);
+		}
 	}
 	public test(input: string): boolean {
 		return this.regexp?.test(input) ?? false;
@@ -75,119 +105,6 @@ function toRegExp(pattern: string) {
 	return re;
 }
 
-
-function anchor(re: string) {
-	return new RegExp(`^${re}$`);
-}
-
-const posixClasses: Record<string, string> = {
-    alnum: 	'\\p{L}\\p{Nl}\\p{Nd}',
-    alpha: 	'\\p{L}\\p{Nl}',
-    ascii: 	'\\x00-\\x7f',
-    blank: 	'\\p{Zs}\\t',
-    cntrl: 	'\\p{Cc}',
-    digit: 	'\\p{Nd}',
-    graph: 	'^\\p{Z}\\p{C}',
-    lower: 	'\\p{Ll}',
-    print: 	'\\p{C}',
-    punct: 	'\\p{P}',
-    space: 	'\\p{Z}\\t\\r\\n\\v\\f',
-    upper: 	'\\p{Lu}',
-    word: 	'\\p{L}\\p{Nl}\\p{Nd}\\p{Pc}',
-    xdigit: 'A-Fa-f0-9',
-};
-
-function _globRe(glob: string): string {
-	let result = '';
-	let depth = 0;
-
-	for (let i = 0; i < glob.length; ++i) {
-		let c = glob[i];
-		switch (c) {
-			case '\\':
-				c = glob[++i];
-				if ('*?+.,^$()|[]a-zA-Z'.includes(c))
-					result += '\\';
-				break;
-
-			case '*':
-				if (glob[i + 1] === '*') {
-					result += '.*';
-					++i;
-				} else {
-					result += '[^/]*';
-				}
-				continue;
-
-			case '?':
-				c = '.';
-				break;
-
-			case '+': case '.': case '^': case '$': case '(': case ')': case '|':
-				result += `\\`;
-				break;
-
-			case '[': {
-				const end = glob.indexOf(']', i + 1);
-				if (end > i) {
-					const next = glob[i + 1];
-					if (next === ':' && glob[end - 1] === ':') {
-						const p = posixClasses[glob.slice(i + 2, end - 1)];
-						if (p) {
-							result += `[${p}]`;
-							i = end;
-							continue;
-						} else {
-							console.log(`Warning: Unknown POSIX class ${glob.slice(i + 2, end - 1)} in glob pattern ${glob}`);
-						}
-					}
-					const neg = next === '!' || next === '^';
-					result += `[${neg ? '^' : ''}${glob.slice(neg ? i + 2 : i + 1, end)}]`;
-					i = end;
-					continue;
-				}
-				result += '\\';
-				break;
-			}
-
-			case '{':
-				++depth;
-				c = '(';
-				break;
-
-			case '}':
-				if (depth > 0) {
-					--depth;
-					c = ')';
-				}
-				break;
-
-			case ',':
-				if (depth > 0)
-					c = '|';
-				break;
-
-		}
-		result += c;
-	}
-	if (depth > 0) {
-		console.log(`Warning: Unmatched { in glob pattern ${glob}`);
-		result += ')'.repeat(depth);
-	}
-	return result;
-}
-
-
-export function globRe(glob: string) {
-	return anchor(_globRe(glob));
-}
-
-export function globReMulti(globs: string[]) {
-	return anchor(globs.map(_globRe).join('|'));
-}
-
-
-
 export async function search(pattern: string, _exclude?:string | string[], onlyfiles?: boolean): Promise<string[]> {
 	const m = /[*?[{}]/.exec(pattern);
 	if (!m)
@@ -199,7 +116,7 @@ export async function search(pattern: string, _exclude?:string | string[], onlyf
 	const exclude	= _exclude ? new Glob(_exclude) : undefined;
 
 	const recurse = async (basePath: string) => {
-		const items = await fs.promises.readdir(basePath, {withFileTypes: true}).catch(() => [] as fs.Dirent[]);
+		const items = await readDirectory(basePath);
 		const result: string[] = [];
 		for (const i of items) {
 			if (onlyfiles === true && !i.isFile())
@@ -219,6 +136,15 @@ export async function search(pattern: string, _exclude?:string | string[], onlyf
 		return result;
 	};
 	return recurse(basePath);
+}
+
+export async function exec(command: string, args: string[] = []) {
+	return new Promise<string>((resolve, reject) => child_process.execFile(command, args, (_error, stdout) => {
+		if (_error)
+			reject(_error);
+		else
+			resolve(stdout);
+	}));
 }
 
 //-----------------------------------------------------------------------------

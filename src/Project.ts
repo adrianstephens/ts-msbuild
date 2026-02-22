@@ -118,10 +118,12 @@ export interface ProjectConfiguration {
 }
 
 export interface ProjectContainer {
-	basedir: string;
-	dirty(): void;
+	baseDir:	string;
+	installDir:	string;
+	dispose():	void;
+	dirty():	void;
+	watch(glob: string, func: (fullpath: string, mode: number) => void): void;
 }
-
 
 interface KnownProjectEntry {
 	make:	new (container: ProjectContainer, type: string, name: string, fullpath: string, guid: string)=>Project,
@@ -139,7 +141,7 @@ export abstract class Project {
 		return Project.all[id.toUpperCase()];
 	}
 	static create(container: ProjectContainer, type: string, name: string, fullpath: string, guid: string) {
-		const constructor 	= known_guids[type]?.make ?? BlankProject;
+		const constructor 	= known_guids[type]?.make ?? Project;
 		return new constructor(container, type, name, fullpath, guid);
 	}
 
@@ -153,7 +155,6 @@ export abstract class Project {
 		return known_exts[(ext[0] === '.' ? ext.slice(1) : ext).toLowerCase()];
 	}
 
-	protected solution_dir: string;
 	dependencies:	Project[] = [];
 	childProjects:	Project[] = [];
 	configuration:	Record<string, ProjectConfiguration> = {};
@@ -162,19 +163,26 @@ export abstract class Project {
 	get name()			{ return this._name; }
 	set name(v: string) { throw "can't rename"; }
 
-	constructor(container: ProjectContainer, public type:string, protected _name:string, public fullpath:string, public guid:string) {
-		this.solution_dir = container.basedir;
+	constructor(public container: ProjectContainer, public type: string, protected _name: string, public fullpath: string, public guid: string) {
 		Project.all[this.guid] = this;
 	}
 
-	abstract load() : Promise<void>;	//reload
-	abstract save(): Promise<void>;		//save if changed
+	async load(): Promise<void> {}	//reload
+	async save(): Promise<void> {}	//save if changed
 
-	abstract solutionRead(_m: string[], _basePath: string): ((line: string) => void) | undefined;
-	abstract solutionWrite(_basePath: string) : string;
+	solutionRead(_m: string[]): ((line: string) => void) | undefined {
+		return;
+	}
+	solutionWrite() : string {
+		return '';
+	}
 
-	abstract addFile(name: string, filepath: string): boolean;
-	abstract getFolders(view: string): Promise<FolderTree>;
+	addFile(_name: string, _filepath: string): Promise<ProjectItemEntry | undefined> {
+		return Promise.resolve(undefined);
+	}
+	getFolders(_view: string): Promise<FolderTree> {
+		return Promise.resolve(new FolderTree());
+	}
 
 	// final implementations
 
@@ -204,21 +212,4 @@ export abstract class Project {
 		return [...new Set(Object.values(this.configuration).map(i => i.Platform))];
 	}
 
-}
-
-export class BlankProject extends Project {
-	async load() {}
-	async save() {}
-	solutionRead(_m: string[], _basePath: string) : ((line: string) => void) | undefined {
-		return undefined;
-	}
-	solutionWrite(_basePath: string) : string {
-		return '';
-	}
-	addFile(_name: string, _filepath: string): boolean {
-		return false;
-	}
-	getFolders(_view: string) {
-		return Promise.resolve(new FolderTree());
-	}
 }
