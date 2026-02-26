@@ -30,7 +30,10 @@ export function ParseSDKKey(key: string) {
 	};
 }
 
-export const langID	 = registry.HKCU.subkey('Control Panel\\International').then(i => parseInt(i.values['Locale'] ?? '0409', 16));
+export const langID	= registry.HKCU.subkey('Control Panel\\International').then(i => parseInt(i.values['Locale'] ?? '0409', 16));
+export const locale	= registry.HKLM.subkey('SOFTWARE\\Classes\\MIME\\Database\\Rfc1766').then(
+	async i => i.values[(await langID as number).toString(16).padStart(4, '0').toUpperCase()].toString().split(';')[0]
+);
 
 export async function dotnet(args: string[]) {
 	return exec('dotnet', args);

@@ -305,16 +305,6 @@ const suoDebuggerFindSource = {
 	exclude:	stringArrayType
 };
 
-async function open_suo(filename: string) : Promise<CompDoc.Reader | undefined> {
-	return fs.promises.readFile(filename).then(bytes => {
-		if (bytes) {
-			const h = new CompDoc.Header(new bin.stream(bytes));
-			if (h.valid())
-				return new CompDoc.Reader(bytes.subarray(h.sector_size()), h);
-		}
-	}).catch(() => undefined);
-}
-
 //-----------------------------------------------------------------------------
 //	Solution
 //-----------------------------------------------------------------------------
@@ -431,7 +421,8 @@ export class Solution implements ProjectContainer {
 		if (this._dirty_suo) {
 			this._dirty_suo = false;
 			const suopath	= this.suo_path();
-			const suo		= await open_suo(suopath);
+			const suo		= await CompDoc.Reader.load(suopath);
+
 			if (suo) {
 				const configStream = suo.find("SolutionConfiguration");
 				if (configStream) {
@@ -472,7 +463,7 @@ export class Solution implements ProjectContainer {
 			const solution = new this(fullpath);
 			await solution.parse(parser);
 
-			const suo = await open_suo(solution.suo_path());
+			const suo = await CompDoc.Reader.load(solution.suo_path());
 			if (suo) {
 				const sourceStream = suo.find("DebuggerFindSource");
 				if (sourceStream) {
@@ -492,6 +483,21 @@ export class Solution implements ProjectContainer {
 					const parts		= solution.config.ActiveCfg.split('|');
 					solution.active	= [Math.max(solution.config_list.indexOf(parts[0]), 0), Math.max(solution.platform_list.indexOf(parts[1]), 0)];
 				}
+
+//SolutionConfiguration - Active build configuration (Debug/Release, platform) ✓ (you're using)
+//UnloadedProjects / UnloadedProjectsEx - Tracks unloaded projects in the solution
+//ProjectTrustInformation - Project trust state (.NET 6+ feature)
+//SelectedLaunchProfileName - Active launch profile for debugging
+//Useful for specific scenarios:
+//ProjInfoEx - Project metadata cache (can speed up UI updates)
+//ClassViewContents - Class View tree state (if you're building navigation UIs)
+//BookmarkState - Editor bookmarks user placed
+//OutliningStateV... - Code folding/outlining state per file
+//DebuggerBreakpoints / DebuggerWatches / DebuggerExceptions ✓ (debug-related, might complement DebuggerFindSource)
+//MRU Solution Files - Recent solutions list
+//Property Manager - Property sheet open/closed state
+//HiddenSlnFolders - Collapsed folders in Solution Explorer
+
 			}
 			return solution;
 		}
