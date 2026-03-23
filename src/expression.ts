@@ -259,20 +259,57 @@ class NETBoolean extends StaticFunctions {
 	ToString()								{ return this.value ? 'True' : 'False'; }
 }
 
+function formatNumber(x: number, format?: string) {
+	if (format && format[0] === '"')
+		format = format.slice(1, -1);
+	if (!format)
+		return x.toString();
+
+	const mode	= format[0];
+	const len	= parseInt(format.substring(1), 10);
+	let s: string;
+
+	switch (mode.toLowerCase()) {
+		case 'd': {
+			const int = Math.floor(x);
+			s = isNaN(len)
+				? int.toString(10)
+				: int < 0
+				? '-' + (-int).toString(10).padStart(len, '0')
+				: int.toString(10).padStart(len, '0');
+			break;
+		}
+		case 'x': s = (x >>> 0).toString(16);
+			if (!isNaN(len))
+				s = s.padStart(len, '0');
+			break;
+		case 'e': s = x.toExponential(len); break;
+		case 'f': s = x.toFixed(len); break;
+		case 'g': s = isNaN(len) ? x.toString() : x.toPrecision(len); break;
+		case 'n': {
+			const digits = isNaN(len) ? 2 : len;
+			s = x.toLocaleString('en-US', {minimumFractionDigits: digits, maximumFractionDigits: digits});
+			break;
+		}
+		default: s = x.toString(); break;
+	}
+	return mode === mode.toUpperCase() ? s.toUpperCase() : s;
+}
+
 // System.Int32, System.Double, etc.
 class NETInt32 extends StaticFunctions {
 	static { StaticFunctions.register('Int32', this); }
-	constructor(private value: number) { super();}
+	constructor(private value: number)		{ super();}
 	static Parse(param: string)				{ return new this(parseInt(param, 10)); }
 	static TryParse(param: string)			{ return !isNaN(parseInt(param, 10)); }
-	ToString()								{ return this.value.toString(); }
+	ToString(format?: string)				{ return formatNumber(this.value, format); }
 }
 class NETDouble extends StaticFunctions {
 	static { StaticFunctions.register('Double', this); }
-	constructor(private value: number) { super();}
+	constructor(private value: number)		{ super();}
 	static Parse(param: string)				{ return new this(parseFloat(param)); }
 	static TryParse(param: string)			{ return !isNaN(parseFloat(param)); }
-	ToString()								{ return this.value.toString(); }
+	ToString(format?: string)				{ return formatNumber(this.value, format); }
 }
 
 // System.DateTime
@@ -290,7 +327,7 @@ class NETDateTime extends StaticFunctions {
 // System.DateTimeOffset (stub)
 class NETDateTimeOffset extends StaticFunctions {
 	static { StaticFunctions.register('DateTimeOffset', this); }
-	constructor(private value: Date) { super(); }
+	constructor(private value: Date) 		{ super(); }
 	static Now()							{ return new this(new Date()); }
 	static UtcNow()							{ return new this(new Date()); }
 	static Parse(param: string)				{ return new this(new Date(param)); }
@@ -301,7 +338,7 @@ class NETDateTimeOffset extends StaticFunctions {
 // System.TimeSpan (stub)
 class NETTimeSpan extends StaticFunctions {
 	static { StaticFunctions.register('TimeSpan', this); }
-	constructor(private value: Number) 		{ super(); }
+	constructor(private value: number) 		{ super(); }
 	static FromSeconds(s: string)			{ return new this(Number(s) * 1000); }
 	static FromMinutes(m: string) 			{ return new this(Number(m) * 60000); }
 	static FromHours(h: string)				{ return new this(Number(h) * 3600000); }
@@ -556,7 +593,7 @@ function getHashCode(s: string) {
 			hash2 = ((hash2 << 5) + hash2 + (hash2 >> 27)) ^ (src[i + 2] + (src[i + 3] << 16));
 	}
 
-	return hash1 + (hash2 * 1566083941);
+	return (hash1 + Math.imul(hash2, 1566083941)) | 0;
 }
 
 
@@ -856,7 +893,7 @@ async function evalPartial(op: string, a: any, b?: any) {
 					return get_boolean(a) || b;
 				if (!unkB)
 					return get_boolean(b) || a;
-				break
+				break;
 			case 'and':
 				if (!unkA)
 					return get_boolean(a) && b;
@@ -907,8 +944,14 @@ export async function Evaluate(result: any, right: string, start: number) {
 		if (right[re2.lastIndex] == '(') {
 			//function
 			const func		= m2[1].toUpperCase();
-			let [close, params] = get_params(right, re2.lastIndex + 1);
-			result 			= await result[func](params);
+			const [close, params] = get_params(right, re2.lastIndex + 1);
+			switch (typeof result) {
+				case 'string': result = new NETString(result); break;
+				case 'number': result = new NETDouble(result); break;
+				case 'boolean': result = new NETBoolean(result); break;
+				default: break;
+			}
+			result 			= await result[func](...params);
 			re2.lastIndex	= close;
 
 		} else if (m2[1]) {

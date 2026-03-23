@@ -1,4 +1,4 @@
-import * as fs from 'fs';
+import { promises as fs } from 'fs';
 import * as path from 'path';
 import * as crypto from 'crypto';
 import * as bin from '@isopodlabs/binary';
@@ -195,115 +195,67 @@ function write_section(type:string, name:string, when: string, section: Record<s
 //-----------------------------------------------------------------------------
 //	suo helpers
 //-----------------------------------------------------------------------------
+//Possibly useful streams:
+//SolutionConfiguration 	Active build configuration (Debug/Release, platform)
+//UnloadedProjects			&
+//UnloadedProjectsEx 		Tracks unloaded projects in the solution
+//ProjectTrustInformation 	Project trust state (.NET 6+ feature)
+//SelectedLaunchProfileName Active launch profile for debugging
+											
+//Useful for specific scenarios:			
+//ProjInfoEx 				Project metadata cache (can speed up UI updates)
+//ClassViewContents 		Class View tree state (if you're building navigation UIs)
+//BookmarkState 			Editor bookmarks user placed
+//OutliningStateV... 		Code folding/outlining state per file
+//DebuggerBreakpoints		&
+//DebuggerWatches			&
+//DebuggerExceptions		might complement DebuggerFindSource
+//MRU Solution Files 		Recent solutions list
+//Property Manager 			Property sheet open/closed state
+//HiddenSlnFolders 			Collapsed folders in Solution Explorer
 
-const string1Type		= bin.StringType(bin.UINT32_LE, 'utf16le', true, 1);
-const stringArrayType	= bin.ArrayType(bin.UINT32_LE, string1Type);
+const string1Type		= bin.String(bin.UINT32_LE, 'utf16le', true, 1);
+const stringArrayType	= bin.Array(bin.UINT32_LE, string1Type);
+const Variant			= CompDoc.ole.Variant(bin.UINT16_LE);
 
-const VT: Record<string, {tag: number, type: bin.TypeT<any>}> = {
-	EMPTY:			   {tag: 0,      type: bin.UINT16_LE},								// VT_EMPTY
-	NULL:			   {tag: 1,      type: bin.UINT16_LE},								// VT_NULL
-	I2:			       {tag: 2,      type: bin.INT16_LE},								// VT_I2
-	I4:			       {tag: 3,      type: bin.INT32_LE},								// VT_I4
-	R4:			       {tag: 4,      type: bin.Float32_LE},								// VT_R4
-	R8:			       {tag: 5,      type: bin.Float64_LE},								// VT_R8
-//	CY:			       {tag: 6,      type: bin.UINT16_LE},								// VT_CY
-//	DATE:			   {tag: 7,      type: bin.UINT16_LE},								// VT_DATE
-	BSTR:			   {tag: 8,      type: bin.StringType(bin.UINT32_LE, 'utf16le')},	// VT_BSTR
-//	DISPATCH:		   {tag: 9,      type: bin.UINT16_LE},								// VT_DISPATCH
-//	ERROR:			   {tag: 10,     type: bin.UINT16_LE},								// VT_ERROR
-	BOOL:			   {tag: 11,     type: bin.UINT16_LE},								// VT_BOOL
-//	VARIANT:		   {tag: 12,     type: bin.UINT16_LE},								// VT_VARIANT
-//	UNKNOWN:		   {tag: 13,     type: bin.UINT16_LE},								// VT_UNKNOWN
-//	DECIMAL:		   {tag: 14,     type: bin.UINT16_LE},								// VT_DECIMAL
-	I1:			       {tag: 16,     type: bin.INT8},									// VT_I1
-	UI1:			   {tag: 17,     type: bin.UINT8},									// VT_UI1
-	UI2:			   {tag: 18,     type: bin.UINT16_LE},								// VT_UI2
-	UI4:			   {tag: 19,     type: bin.UINT32_LE},								// VT_UI4
-	I8:			       {tag: 20,     type: bin.INT64_LE},								// VT_I8
-	UI8:			   {tag: 21,     type: bin.UINT64_LE},								// VT_UI8
-	INT:			   {tag: 22,     type: bin.INT32_LE},								// VT_INT
-	UINT:			   {tag: 23,     type: bin.UINT32_LE},								// VT_UINT
-//	VOID:			   {tag: 24,     type: bin.UINT32_LE},								// VT_VOID
-//	HRESULT:		   {tag: 25,     type: bin.UINT32_LE},								// VT_HRESULT
-//	PTR:			   {tag: 26,     type: bin.UINT32_LE},								// VT_PTR
-//	SAFEARRAY:		   {tag: 27,     type: bin.UINT32_LE},								// VT_SAFEARRAY
-//	CARRAY:			   {tag: 28,     type: bin.UINT32_LE},								// VT_CARRAY
-//	USERDEFINED:	   {tag: 29,     type: bin.UINT32_LE},								// VT_USERDEFINED
-//	LPSTR:			   {tag: 30,     type: bin.UINT32_LE},								// VT_LPSTR
-//	LPWSTR:			   {tag: 31,     type: bin.UINT32_LE},								// VT_LPWSTR
-//	RECORD:			   {tag: 36,     type: bin.UINT32_LE},								// VT_RECORD
-//	INT_PTR:		   {tag: 37,     type: bin.UINT32_LE},								// VT_INT_PTR
-//	UINT_PTR:		   {tag: 38,     type: bin.UINT32_LE},								// VT_UINT_PTR
-//	FILETIME:		   {tag: 64,     type: bin.UINT32_LE},								// VT_FILETIME
-//	BLOB:			   {tag: 65,     type: bin.UINT32_LE},								// VT_BLOB
-//	STREAM:			   {tag: 66,     type: bin.UINT32_LE},								// VT_STREAM
-//	STORAGE:		   {tag: 67,     type: bin.UINT32_LE},								// VT_STORAGE
-//	STREAMED_OBJECT:   {tag: 68,     type: bin.UINT32_LE},								// VT_STREAMED_OBJECT
-//	STORED_OBJECT:	   {tag: 69,     type: bin.UINT32_LE},								// VT_STORED_OBJECT
-//	BLOB_OBJECT:	   {tag: 70,     type: bin.UINT32_LE},								// VT_BLOB_OBJECT
-//	CF:			       {tag: 71,     type: bin.UINT32_LE},								// VT_CF
-//	CLSID:			   {tag: 72,     type: bin.UINT32_LE},								// VT_CLSID
-//	VERSIONED_STREAM:  {tag: 73,     type: bin.UINT32_LE},								// VT_VERSIONED_STREAM
-//	BSTR_BLOB:		   {tag: 0xfff,  type: bin.UINT32_LE},								// VT_BSTR_BLOB
-//	VECTOR:		       {tag: 0x1000, type: bin.UINT32_LE},								// VT_VECTOR
-//	ARRAY:		       {tag: 0x2000, type: bin.UINT32_LE},								// VT_ARRAY
-//	BYREF:		       {tag: 0x4000, type: bin.UINT32_LE},								// VT_BYREF
-};
-const VARIANT_BY_TAG: Record<number, bin.TypeT<any>> = Object.fromEntries(Object.values(VT).map(i => [i.tag, i.type]));
-
-const suoVariant = {
-	get(reader: bin.stream) {
-		const tag	= bin.read(reader, bin.UINT16_LE);
-		const type	= VARIANT_BY_TAG[tag & 0x7ff];
-		if (type) {
-			if (tag & 0x2000)
-				return bin.readn(reader, type, bin.read(reader, bin.UINT32_LE));
-			return type.get(reader);
-		}
-		return String.fromCharCode(tag);
-	},	
-	put(writer: bin.stream, value: any) {
-		let tag;
-		switch (typeof value) {
-			case 'number':	tag = 3; break;	//VT_I4
-			case 'string':
-				if (value.length == 1) {
-					bin.write(writer, bin.UINT16_LE, value.charCodeAt(0));
-					return;
-				}
-				tag = 8; // VT_BSTR
-				break;
-			case 'object':
-				if (Array.isArray(value)) {
-					switch (typeof value[0]) {
-						case 'number':	tag = 0x2003; break;	// VT_VECTOR | VT_I4
-						case 'string':	tag = 0x2008; break;	// VT_VECTOR | VT_BSTR
-						default:	throw "bad array type";
-					}
-					bin.write(writer, {tag: bin.UINT16_LE, value: bin.ArrayType(bin.UINT32_LE, VARIANT_BY_TAG[tag & 0x7ff])}, {tag, value});
-				}
-				// fallthrough
-			default:
-				throw "bad token";
-		}
-		bin.write(writer, {tag: bin.UINT16_LE, value: VARIANT_BY_TAG[tag]}, {tag, value});
-	}
-};
-
-const suoSolutionConfiguration = bin.RemainingArrayType({
-	name:		bin.StringType(bin.UINT32_LE, 'utf16le', true),
-	equals:		bin.Expect(suoVariant, '='),
-	value:		suoVariant,
-	semicolon:	bin.Expect(suoVariant, ';')
+const suoSolutionConfiguration = bin.RemainingArray({
+	name:		bin.String(bin.UINT32_LE, 'utf16le', true),
+	equals:		bin.Expect(Variant, '='),
+	value:		Variant,
+	semicolon:	bin.Expect(Variant, ';')
 });
 
 const suoDebuggerFindSource = {
-	ver:		bin.SkipType(4),	//version?
-	unk:		bin.SkipType(4),	//unknown
+	ver:		bin.AfterSkip(4, bin.Const(undefined)),	//version?
+	unk:		bin.AfterSkip(4, bin.Const(undefined)),	//unknown
 	include:	stringArrayType,
-	unk2:		bin.SkipType(4),	//unknown
+	unk2:		bin.AfterSkip(4, bin.Const(undefined)),	//unknown
 	exclude:	stringArrayType
 };
+
+class FileBacking implements CompDoc.Backing {
+	private fd;
+
+	constructor(filename: string) {
+		this.fd = fs.mkdir(path.dirname(filename), { recursive: true })
+				.then(() => fs.open(filename, fs.constants.O_RDWR | fs.constants.O_CREAT));
+	}
+	async readAt(offset: number, size: number) : Promise<Uint8Array> {
+		const data	= Buffer.alloc(size);
+		const fd	= await this.fd;
+		const _read	= await fd.read(data, 0, size, offset);
+		return data;
+	}
+	async writeAt(offset: number, data: Uint8Array) {
+		const fd = await this.fd;
+		await fd.write(data, 0, data.length, offset);
+	}
+
+	async close() {
+		const fd = await this.fd;
+		await fd.close();
+	}
+}
 
 //-----------------------------------------------------------------------------
 //	Solution
@@ -357,7 +309,7 @@ export class Solution implements ProjectContainer {
 	}
 
 	get startup() : Project | undefined {
-		return this.projects[this.config.StartupProject];
+		return this.projects[this.config.StartupProject] ?? Object.values(this.projects)[0];
 	}
 	set startup(project: Project | string) {
 		if (typeof project !== 'string')
@@ -401,7 +353,7 @@ export class Solution implements ProjectContainer {
 		return {
 			VisualStudioVersion:	`${this.majorVersion()}.0`,
 			VsInstallRoot:			this.vs?.Path ?? '?',
-			//VCTargetsPath:			this.vs?.VCTargetsPath + '\\',
+			//VCTargetsPath:		this.vs?.VCTargetsPath + '\\',
 		};
 	}
 	projectActiveConfiguration(project: Project) {
@@ -420,23 +372,21 @@ export class Solution implements ProjectContainer {
 	async save() {
 		if (this._dirty_suo) {
 			this._dirty_suo = false;
-			const suopath	= this.suo_path();
-			const suo		= await CompDoc.Reader.load(suopath);
 
-			if (suo) {
-				const configStream = suo.find("SolutionConfiguration");
-				if (configStream) {
-					const writer	= new bin.growingStream();
-					const data		= Object.entries(this.config).map(([name, value]) => ({name, value}));
-					bin.write(writer, suoSolutionConfiguration, data);
-					suo.write(configStream, writer.terminate());
-					await suo.flush(suopath);
-				}
+			const suo = await CompDoc.Reader.load(new FileBacking(this.suo_path()));
+			const configStream = suo.find("SolutionConfiguration", true);
+			
+			if (configStream && configStream.is_data()) {
+				const writer	= new bin.growingStream();
+				const data		= Object.entries(this.config).map(([name, value]) => ({name, value}));
+				bin.write(writer, suoSolutionConfiguration, data);
+				configStream.write(writer.terminate());
+				await suo.flush();
 			}
 		}
 		if (this._dirty) {
 			this._dirty = false;
-			await fs.promises.writeFile(this.fullpath, this.format());
+			await fs.writeFile(this.fullpath, this.format());
 		}
 
 		await Promise.all(Object.values(this.projects).map(proj => proj.save()));
@@ -444,7 +394,7 @@ export class Solution implements ProjectContainer {
 
 	static async load(fullpath: string): Promise<Solution | undefined> {
 		async function getParser() {
-			const bytes		= await fs.promises.readFile(fullpath);
+			const bytes		= await fs.readFile(fullpath);
 			if (bytes) {
 				const content	= new TextDecoder().decode(bytes);
 				const parser	= new LineParser(content.split('\n'));
@@ -463,19 +413,20 @@ export class Solution implements ProjectContainer {
 			const solution = new this(fullpath);
 			await solution.parse(parser);
 
-			const suo = await CompDoc.Reader.load(solution.suo_path());
+			//const suo = await fs.readFile(solution.suo_path()).then(bytes => CompDoc.Reader.loadBuffer(bytes));
+			const suo = await CompDoc.Reader.load(new FileBacking(solution.suo_path()));
+
 			if (suo) {
 				const sourceStream = suo.find("DebuggerFindSource");
-				if (sourceStream) {
-					const source = bin.read(new bin.stream(suo.read(sourceStream)), suoDebuggerFindSource);
+				if (sourceStream && sourceStream.is_data()) {
+					const source = bin.read(new bin.stream(await sourceStream.read()), suoDebuggerFindSource);
 					solution.debug_include = source.include;
 					solution.debug_exclude = source.exclude;
 				}	
 
 				const configStream = suo.find("SolutionConfiguration");
-				if (configStream) {
-					const data0		= suo.read(configStream);
-					const config	= bin.read(new bin.stream(data0), suoSolutionConfiguration);
+				if (configStream && configStream.is_data()) {
+					const config	= bin.read(new bin.stream(await configStream.read()), suoSolutionConfiguration);
 					solution.config	= config.reduce((acc, {name, value}) => (acc[name] = value, acc), {} as Record<string, any>);
 				}
 
@@ -484,19 +435,6 @@ export class Solution implements ProjectContainer {
 					solution.active	= [Math.max(solution.config_list.indexOf(parts[0]), 0), Math.max(solution.platform_list.indexOf(parts[1]), 0)];
 				}
 
-//SolutionConfiguration - Active build configuration (Debug/Release, platform) ✓ (you're using)
-//UnloadedProjects / UnloadedProjectsEx - Tracks unloaded projects in the solution
-//ProjectTrustInformation - Project trust state (.NET 6+ feature)
-//SelectedLaunchProfileName - Active launch profile for debugging
-//Useful for specific scenarios:
-//ProjInfoEx - Project metadata cache (can speed up UI updates)
-//ClassViewContents - Class View tree state (if you're building navigation UIs)
-//BookmarkState - Editor bookmarks user placed
-//OutliningStateV... - Code folding/outlining state per file
-//DebuggerBreakpoints / DebuggerWatches / DebuggerExceptions ✓ (debug-related, might complement DebuggerFindSource)
-//MRU Solution Files - Recent solutions list
-//Property Manager - Property sheet open/closed state
-//HiddenSlnFolders - Collapsed folders in Solution Explorer
 
 			}
 			return solution;

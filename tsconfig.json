@@ -15,7 +15,7 @@
 		"rootDir": "./src",
 		"plugins": [
 			//{
-			//	"transform": "./scripts/transform.ts",
+			//	"transform": "./npm_modules/@isopodlabs/binary/scripts/transform.ts",
 			//	"afterDeclarations": true
 			//}
 		]
