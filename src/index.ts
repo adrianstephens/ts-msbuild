@@ -6,7 +6,8 @@ import * as xml from '@isopodlabs/xml';
 
 export { Project, Folder, FolderTree, ProjectItemEntry, FileEntry as makeFileEntry } from './Project';
 export { Solution, SolutionFolder } from './Solution';
-export { MsBuildBase, MsBuildProject, Items, PropertyContext, Origins } from './MsBuild';
+export { MsBuildBase, MsBuildProject, Items, PropertyContext, Origins, evaluatePropsAndImports } from './MsBuild';
+export { execute, ExecuteOptions } from './Execute';
 export * as Locations from './Locations';
 
 export const stats = {

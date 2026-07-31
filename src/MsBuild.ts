@@ -265,7 +265,7 @@ async function evaluateImport(import_path: string, properties: PropertyContext, 
 		properties.setPath(currentPath);
 }
 
-async function evaluatePropsAndImports(raw_xml: xml.Element[], properties: PropertyContext, imports?: Imports, modified?: Origins) : Promise<void> {
+export async function evaluatePropsAndImports(raw_xml: xml.Element[], properties: PropertyContext, imports?: Imports, modified?: Origins) : Promise<void> {
 	for (const element of raw_xml) {
 		if (await properties.checkConditional(element.attributes.Condition)) {
 			if (element.name === 'PropertyGroup') {
